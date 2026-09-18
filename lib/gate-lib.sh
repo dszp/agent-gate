@@ -12,6 +12,7 @@
 set -uo pipefail
 
 GATE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATE_ROOT="$(cd "$GATE_LIB_DIR/.." && pwd)"
 : "${GATE_BUILTIN_DIR:=$GATE_LIB_DIR/../gates.d}"
 
 gate_die()  { echo "$*" >&2; exit 2; }
@@ -23,14 +24,31 @@ gate_warn_deprecated() { # <old> <new> — one note per name per process
     echo "agent-gate: $1 is deprecated, use $2" >&2
 }
 
+# ---- deprecated-name mapping — ONE place. Delete this function and its three
+# call sites (below, and in gate_timeout_for) when the legacy names are retired.
+gate_legacy_env() { # <new> <old>... -> value of <new>, else first-set <old> (warns once); rc=1 if none set
+    local new="$1"; shift
+    [[ -n "${!new:-}" ]] && { printf '%s' "${!new}"; return 0; }
+    local old
+    for old in "$@"; do
+        if [[ -n "${!old:-}" ]]; then
+            gate_warn_deprecated "$old" "$new"
+            printf '%s' "${!old}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ---- config -------------------------------------------------------------------
 gate_conf_load() {
     GATE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/agent-gate"
     # shellcheck source=/dev/null
-    [[ -f "$GATE_CONF/config" ]] && . "$GATE_CONF/config"
-    [[ -z "${GATE_OP_BIN:-}" && -n "${OP_BIN:-}" ]] && { gate_warn_deprecated OP_BIN GATE_OP_BIN; GATE_OP_BIN="$OP_BIN"; }
-    [[ -z "${GATE_1P_PASSPHRASE:-}" && -n "${CLAUDE_1P_PASSPHRASE:-}" ]] && \
-        { gate_warn_deprecated CLAUDE_1P_PASSPHRASE GATE_1P_PASSPHRASE; GATE_1P_PASSPHRASE="$CLAUDE_1P_PASSPHRASE"; }
+    # A user's config may reference an unbound variable of their own; don't let
+    # that kill the tool under our own `set -u`.
+    if [[ -f "$GATE_CONF/config" ]]; then set +u; . "$GATE_CONF/config"; set -u; fi
+    GATE_OP_BIN="$(gate_legacy_env GATE_OP_BIN OP_BIN)" || true
+    GATE_PASSPHRASE="$(gate_legacy_env GATE_PASSPHRASE CLAUDE_1P_PASSPHRASE)" || true
     : "${GATE_SSH_KEY:=$HOME/.ssh/agent-gate}"
     : "${GATE_SSH_SOCK:=$HOME/.ssh/agent-gate.sock}"
     : "${GATE_OP_BIN:=op}"
@@ -41,7 +59,13 @@ gate_conf_load() {
     : "${GATE_1P_RT:=$GATE_RT_BASE/agent-gate/1p}"
     export GATE_CONF GATE_SSH_KEY GATE_SSH_SOCK GATE_OP_BIN GATE_DEFAULT_TIMEOUT \
            GATE_OWNER GATE_RT_BASE GATE_DIR GATE_1P_RT
-    [[ -n "${GATE_1P_PASSPHRASE:-}" ]] && export GATE_1P_PASSPHRASE
+    # GATE_PASSPHRASE and its alias GATE_1P_PASSPHRASE must agree: whichever the
+    # caller set, mirror it onto the other so bin/1p and this lib see the same value.
+    if [[ -n "${GATE_PASSPHRASE:-}" || -n "${GATE_1P_PASSPHRASE:-}" ]]; then
+        : "${GATE_PASSPHRASE:=${GATE_1P_PASSPHRASE:-}}"
+        : "${GATE_1P_PASSPHRASE:=${GATE_PASSPHRASE:-}}"
+        export GATE_PASSPHRASE GATE_1P_PASSPHRASE
+    fi
     return 0
 }
 
@@ -77,19 +101,27 @@ gate_parse_timeout() { # <spec> -> seconds; rc=2 on malformed. Mirrors `ssh-add 
     local t="$1" n unit secs
     if [[ "$t" =~ ^([0-9]+)([smhdw]?)$ ]]; then n="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
     else echo "agent-gate: bad timeout '$t' (use 900, 15m, 1h, 2d)" >&2; return 2; fi
-    case "$unit" in w) secs=$((n*604800));; d) secs=$((n*86400));; h) secs=$((n*3600));; m) secs=$((n*60));; *) secs="$n";; esac
+    # 10#$n: force base-10 so a leading zero (008m) isn't parsed as invalid octal.
+    case "$unit" in
+        w) secs=$((10#$n*604800));;
+        d) secs=$((10#$n*86400));;
+        h) secs=$((10#$n*3600));;
+        m) secs=$((10#$n*60));;
+        *) secs=$((10#$n));;
+    esac
     [[ "$secs" -gt 0 ]] || { echo "agent-gate: timeout must be > 0 (got '$t')" >&2; return 2; }
     printf '%s' "$secs"
 }
 
 gate_timeout_for() { # <name> [explicit] -> effective spec. arg > GATE_<NAME>_TIMEOUT > default
-    local name="$1" explicit="${2:-}" up var legacy
+    local name="$1" explicit="${2:-}" up var val
     [[ -n "$explicit" ]] && { printf '%s' "$explicit"; return 0; }
     up="$(tr '[:lower:]-' '[:upper:]_' <<<"$name")"; var="GATE_${up}_TIMEOUT"
-    [[ -n "${!var:-}" ]] && { printf '%s' "${!var}"; return 0; }
-    for legacy in "CLAUDE_${up}_TIMEOUT" $([[ "$name" == ssh ]] && echo CLAUDE_UNLOCK_TIMEOUT); do
-        [[ -n "${!legacy:-}" ]] && { gate_warn_deprecated "$legacy" "$var"; printf '%s' "${!legacy}"; return 0; }
-    done
+    if [[ "$name" == ssh ]]; then
+        val="$(gate_legacy_env "$var" "CLAUDE_${up}_TIMEOUT" CLAUDE_UNLOCK_TIMEOUT)" && { printf '%s' "$val"; return 0; }
+    else
+        val="$(gate_legacy_env "$var" "CLAUDE_${up}_TIMEOUT")" && { printf '%s' "$val"; return 0; }
+    fi
     printf '%s' "$GATE_DEFAULT_TIMEOUT"
 }
 
@@ -100,9 +132,10 @@ gate_fmt_remaining() { # <seconds> -> "1h 04m" / "12m 30s"
 }
 
 # ---- kind: secret -------------------------------------------------------------
-readonly GATE_OSSL=(-aes-256-cbc -pbkdf2 -iter 600000)
+[[ -v GATE_OSSL ]] || readonly GATE_OSSL=(-aes-256-cbc -pbkdf2 -iter 600000)
 
-gate_read_pass() { # <label> -> passphrase on stdout. GATE_1P_PASSPHRASE is the automation/test hook.
+gate_read_pass() { # <label> -> passphrase on stdout. GATE_PASSPHRASE (alias GATE_1P_PASSPHRASE) is the automation/test hook.
+    if [[ -n "${GATE_PASSPHRASE:-}" ]]; then printf '%s' "$GATE_PASSPHRASE"; return 0; fi
     if [[ -n "${GATE_1P_PASSPHRASE:-}" ]]; then printf '%s' "$GATE_1P_PASSPHRASE"; return 0; fi
     local p; read -rsp "$1 gate passphrase: " p >&2; echo >&2; printf '%s' "$p"
 }
@@ -121,16 +154,23 @@ secret_remaining() { # <name> -> seconds left; rc=1 if locked/expired
     printf '%s' $(( e - now ))
 }
 
-_secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock timer
+_secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock timer; rc=1 on write failure (fail closed)
     local name="$1" secret="$2" secs="$3" rt tok
     rt="$(secret_rt "$name")"; tok="$rt/$(secret_tokfile "$name")"
-    umask 077; mkdir -p "$rt"
-    printf '%s' "$secret" > "$tok"; chmod 600 "$tok"
-    echo $(( $(date +%s) + secs )) > "$rt/expiry"; chmod 600 "$rt/expiry"
+    umask 077
+    if ! mkdir -p "$rt" || ! printf '%s' "$secret" > "$tok" || ! echo $(( $(date +%s) + secs )) > "$rt/expiry"; then
+        echo "agent-gate: cannot write $rt (is GATE_RT_BASE writable?)" >&2
+        return 1
+    fi
+    chmod 600 "$tok" "$rt/expiry"
+    case "$(stat -f -c %T "$rt" 2>/dev/null)" in
+        tmpfs|ramfs) ;;
+        *) echo "agent-gate: warning: $rt is not memory-backed; the token will survive a reboot" >&2 ;;
+    esac
     systemctl --user stop "agent-gate-lock-$name.timer"           >/dev/null 2>&1
     systemctl --user reset-failed "agent-gate-lock-$name.service" >/dev/null 2>&1
     systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-lock-$name" \
-        "$GATE_LIB_DIR/../bin/lock" "$name" >/dev/null 2>&1 \
+        "$GATE_ROOT/bin/lock" "$name" >/dev/null 2>&1 \
         || echo "(note: auto-lock timer for $name couldn't be scheduled; expiry is still enforced on use)" >&2
 }
 
@@ -155,12 +195,12 @@ secret_unlock() { # <name> <timeout-spec>  rc: 0 ok | 1 failed | 2 bad timeout
     local name="$1" spec="$2" secs secret
     secs="$(gate_parse_timeout "$spec")" || return 2
     if secret="$(_secret_from_ref "$name")"; then
-        _secret_write "$name" "$secret" "$secs"
+        _secret_write "$name" "$secret" "$secs" || return 1
         echo "Unlocked $name for $spec (from 1Password). Lock early: lock $name"; return 0
     fi
     [[ -n "$(gate_opt "$name" ref)" ]] && echo "Couldn't reach 1Password for $name — falling back to the passphrase prompt." >&2
     secret="$(_secret_from_blob "$name")" || return 1
-    _secret_write "$name" "$secret" "$secs"
+    _secret_write "$name" "$secret" "$secs" || return 1
     echo "Unlocked $name for $spec (from the enrolled blob). Lock early: lock $name"
 }
 
@@ -221,7 +261,7 @@ agent_lock() { # <name>
 
 # ---- kind: sa -----------------------------------------------------------------
 # 1p owns multi-profile state; the dispatcher delegates rather than duplicating it.
-sa_bin()    { printf '%s' "$GATE_LIB_DIR/../bin/1p"; }
+sa_bin()    { printf '%s' "$GATE_ROOT/bin/1p"; }
 sa_status() { "$(sa_bin)" status 2>/dev/null; }
 sa_unlock() { shift; "$(sa_bin)" unlock "$@"; }   # <name> [profile] [timeout]
 sa_lock()   { "$(sa_bin)" lock; }
