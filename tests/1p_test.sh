@@ -10,6 +10,10 @@ setup() {
     export HOME="$TMP/home"; export XDG_RUNTIME_DIR="$TMP/run"
     export XDG_CONFIG_HOME="$HOME/.config"
     mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMP/bin"
+    # Unset every knob a developer's shell might carry in (mirrors harness.sh).
+    unset GATE_SSH_KEY GATE_SSH_SOCK GATE_OP_BIN GATE_DEFAULT_TIMEOUT GATE_OWNER \
+          GATE_RT_BASE GATE_DIR GATE_1P_RT GATE_PASSPHRASE GATE_1P_PASSPHRASE OP_BIN \
+          CLAUDE_UNLOCK_TIMEOUT CLAUDE_1P_TIMEOUT CLAUDE_1P_PASSPHRASE 2>/dev/null
     # stub op: log argv + token, answer whoami/read from env/log
     cat > "$TMP/bin/op" <<'OP'
 #!/usr/bin/env bash
@@ -25,7 +29,7 @@ OP
     printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/systemctl"
     chmod +x "$TMP/bin/op" "$TMP/bin/systemd-run" "$TMP/bin/systemctl"
     export PATH="$TMP/bin:$PATH"
-    export GATE_OP_BIN="$TMP/bin/op"   # 1p reads via $OP_BIN (real op in prod); tests use the stub
+    export GATE_OP_BIN="$TMP/bin/op"   # 1p reads via $GATE_OP_BIN (real op in prod); tests use the stub
 }
 teardown() { rm -rf "$TMP"; }
 
@@ -41,6 +45,7 @@ test_help() {
     assert_exit "help exit" "$rc" "0"
     assert_contains "help text" "$out" "1p unlock"
     assert_contains "help no raw code" "$out" "1p status"
+    assert_contains "help includes title line" "$out" "1p — scoped, passphrase-gated, auto-expiring, allowlisted access to 1Password"
     if [[ "$out" == *"set -uo pipefail"* ]]; then FAIL=$((FAIL+1)); echo "FAIL help leaks raw code"; else PASS=$((PASS+1)); fi
     teardown
 }
@@ -108,6 +113,25 @@ test_unlock_wrong_passphrase() {
     assert_exit "unlock wrong-pass exit" "$rc" "1"
     assert_contains "unlock wrong-pass text" "$out" "NOT unlocked"
     [[ -e "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token" ]] && { FAIL=$((FAIL+1)); echo "FAIL token written on wrong pass"; } || PASS=$((PASS+1))
+    teardown
+}
+
+test_unlock_write_fails_closed() {
+    setup
+    _enroll "Agent-Test" "ops_tok1" pw acme
+    out="$(GATE_1P_RT=/proc/nope GATE_1P_PASSPHRASE=pw run unlock acme 15m 2>"$TMP/err_wf")"; rc=$?
+    assert_exit "unlock write fails-closed exit" "$rc" "1"
+    if [[ "$out" == *"Unlocked"* ]]; then FAIL=$((FAIL+1)); echo "FAIL unlock write fails-closed: stdout has Unlocked: [$out]"; else PASS=$((PASS+1)); fi
+    assert_contains "unlock write fails-closed stderr" "$(cat "$TMP/err_wf")" "cannot write"
+    teardown
+}
+
+test_unlock_rejects_unknown_arg() {
+    setup
+    _enroll "Agent-Test" "ops_tok1" pw acme
+    out="$(GATE_1P_PASSPHRASE=pw run unlock notaprofile 2>&1)"; rc=$?
+    assert_exit "unlock unknown-arg exit" "$rc" "2"
+    assert_contains "unlock unknown-arg text" "$out" "'notaprofile' is not an enrolled profile or a timeout (profiles: acme)"
     teardown
 }
 
@@ -276,7 +300,7 @@ test_enroll_rejects_invalid_profile_name() {
     assert_exit "enroll invalid-profile exit" "$rc" "2"
     assert_contains "enroll invalid-profile text" "$out" "invalid profile"
     shopt -s nullglob
-    local -a leaked=("$HOME/.1p"/*.enc)
+    local -a leaked=("$XDG_CONFIG_HOME/agent-gate/1p"/*.enc)
     shopt -u nullglob
     [[ "${#leaked[@]}" -eq 0 ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL enroll invalid-profile created file(s): ${leaked[*]}"; }
     teardown
@@ -352,7 +376,8 @@ test_unlock_all_by_default() {
 
 test_help; test_status_empty; test_parse_timeout_default
 test_enroll_writes_encrypted; test_enroll_rejects_bad_token
-test_unlock_writes_tmpfs; test_unlock_wrong_passphrase; test_unlock_single_default_profile
+test_unlock_writes_tmpfs; test_unlock_wrong_passphrase; test_unlock_write_fails_closed; test_unlock_rejects_unknown_arg
+test_unlock_single_default_profile
 test_status_unlocked; test_lock_scrubs; test_lock_all
 test_read_locked; test_read_injects_token; test_blocked_verb; test_item_get_allowed
 test_routing_by_vault; test_routing_ambiguous_requires_p; test_write_verbs_allowed

@@ -24,6 +24,25 @@ test_config_file_overrides() {
     teardown
 }
 
+test_config_file_unbound_var_is_safe() {
+    setup
+    # A config referencing one of the caller's own unset variables must not kill
+    # the tool under our `set -u` (item A8): it's sourced with `set +u`.
+    printf 'GATE_OWNER="Bob${SOME_VAR_THE_USER_NEVER_SET}"\n' > "$XDG_CONFIG_HOME/agent-gate/config"
+    out="$(run_lib 'echo "$GATE_OWNER"' 2>"$TMP/err_cfg")"; rc=$?
+    assert_exit "config unbound var rc" "$rc" "0"
+    assert_eq "config unbound var owner still loaded" "$out" "Bob"
+    assert_eq "config unbound var no stderr" "$(cat "$TMP/err_cfg")" ""
+    teardown
+}
+
+test_double_source_is_safe() {
+    setup
+    err="$(bash -c ". '$REPO/lib/gate-lib.sh'; . '$REPO/lib/gate-lib.sh'" 2>&1 1>/dev/null)"
+    assert_eq "double-source stderr empty" "$err" ""
+    teardown
+}
+
 test_deprecated_env() {
     setup
     out="$(OP_BIN=/legacy/op run_lib 'echo "$GATE_OP_BIN"' 2>"$TMP/err")"
@@ -34,6 +53,11 @@ test_deprecated_env() {
     assert_contains "CLAUDE_UNLOCK_TIMEOUT warns" "$(cat "$TMP/err")" "CLAUDE_UNLOCK_TIMEOUT is deprecated"
     out="$(CLAUDE_FOO_TIMEOUT=45m run_lib 'gate_register foo secret; gate_timeout_for foo' 2>/dev/null)"
     assert_eq "CLAUDE_<NAME>_TIMEOUT honored" "$out" "45m"
+    out="$(CLAUDE_1P_PASSPHRASE=oldpw run_lib 'echo "$GATE_PASSPHRASE|$GATE_1P_PASSPHRASE"' 2>"$TMP/err_pp")"
+    assert_eq "CLAUDE_1P_PASSPHRASE maps to GATE_PASSPHRASE" "$out" "oldpw|oldpw"
+    assert_contains "CLAUDE_1P_PASSPHRASE warns" "$(cat "$TMP/err_pp")" "CLAUDE_1P_PASSPHRASE is deprecated, use GATE_PASSPHRASE"
+    out="$(GATE_1P_PASSPHRASE=newpw run_lib 'echo "$GATE_PASSPHRASE|$GATE_1P_PASSPHRASE"')"
+    assert_eq "GATE_1P_PASSPHRASE alias mirrored onto GATE_PASSPHRASE" "$out" "newpw|newpw"
     teardown
 }
 
@@ -43,6 +67,7 @@ test_timeout_parse_and_precedence() {
     assert_eq "minutes"   "$(run_lib 'gate_parse_timeout 15m')" "900"
     assert_eq "hours"     "$(run_lib 'gate_parse_timeout 1h')"  "3600"
     assert_eq "days"      "$(run_lib 'gate_parse_timeout 2d')"  "172800"
+    assert_eq "leading zero minutes (base-10, not octal)" "$(run_lib 'gate_parse_timeout 008m')" "480"
     run_lib 'gate_parse_timeout nope' >/dev/null 2>&1; assert_exit "bad timeout rc" "$?" "2"
     run_lib 'gate_parse_timeout 0'    >/dev/null 2>&1; assert_exit "zero timeout rc" "$?" "2"
     run_lib 'gate_parse_timeout abcs' 2>"$TMP/err_abcs"; assert_exit "abcs rc" "$?" "2"; assert_contains "abcs stderr" "$(cat "$TMP/err_abcs")" "bad timeout"
@@ -135,6 +160,16 @@ test_secret_no_ref_no_blob() {
     teardown
 }
 
+test_secret_write_fails_closed() {
+    _secret_setup
+    stub op 'echo "s3cret"'
+    out="$(GATE_RT_BASE=/proc/nope _run_secret 'secret_unlock tok 15m' 2>"$TMP/err_wf")"; rc=$?
+    assert_exit "secret write fails-closed rc" "$rc" "1"
+    if [[ "$out" == *"Unlocked"* ]]; then FAIL=$((FAIL+1)); echo "FAIL secret write fails-closed: stdout has Unlocked: [$out]"; else PASS=$((PASS+1)); fi
+    assert_contains "secret write fails-closed stderr" "$(cat "$TMP/err_wf")" "cannot write"
+    teardown
+}
+
 test_secret_custom_rt_and_lock() {
     _secret_setup
     echo 'gate_register tok secret ref=op://V/i/f rt=$GATE_RT_BASE/legacy-dir tokfile=vaultpw' > "$XDG_CONFIG_HOME/agent-gate/gates.d/tok.sh"
@@ -199,8 +234,31 @@ test_gate_ssh_locked_and_unlocked() {
     assert_eq "gate-ssh locked msg" "$out" "LOCKED — no key loaded. Ask Alice to run: unlock ssh [timeout]"
     stub ssh-add 'exit 0'
     bash "$REPO/bin/gate-ssh" root@host uptime >/dev/null 2>&1; assert_exit "gate-ssh unlocked rc" "$?" "0"
-    assert_contains "ssh opts" "$(stub_log)" "ssh -o IdentitiesOnly=yes -i $HOME/.ssh/agent-gate -o IdentityAgent=$HOME/.ssh/agent-gate.sock -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 root@host uptime"
+    assert_contains "ssh opts" "$(stub_log)" "ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -i $HOME/.ssh/agent-gate -o IdentityAgent=$HOME/.ssh/agent-gate.sock -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 root@host uptime"
+    ssh_line="$(grep '^ssh ' "$XDG_RUNTIME_DIR/stub.log" | tail -1)"
+    case "$ssh_line" in
+        "ssh -F /dev/null -o BatchMode=yes"*) PASS=$((PASS+1));;
+        *) FAIL=$((FAIL+1)); echo "FAIL ssh argv prefix: [$ssh_line]";;
+    esac
     bash "$REPO/bin/gate-ssh" >/dev/null 2>&1; assert_exit "gate-ssh no args rc" "$?" "1"
+    teardown
+}
+
+test_gate_ssh_missing_key_or_sock() {
+    setup
+    stub ssh-add 'exit 0'; stub ssh 'exit 0'
+    # GATE_SSH_KEY/GATE_SSH_SOCK always default to non-empty via gate_conf_load, so
+    # to exercise gate-ssh's own emptiness guard, shadow the built-in ssh gate with
+    # a private one whose agent_key/agent_sock legitimately report empty.
+    local bdir="$TMP/builtin-empty"; mkdir -p "$bdir"
+    cat > "$bdir/ssh.sh" <<'EOF'
+agent_key()  { printf ''; }
+agent_sock() { printf ''; }
+gate_register ssh agent
+EOF
+    out="$(GATE_BUILTIN_DIR="$bdir" bash "$REPO/bin/gate-ssh" root@host uptime 2>&1)"; rc=$?
+    assert_exit "gate-ssh missing key/socket rc" "$rc" "2"
+    assert_contains "gate-ssh missing key/socket msg" "$out" "ssh gate has no key/socket configured"
     teardown
 }
 
@@ -238,11 +296,23 @@ test_dispatcher_unlock_all_order() {
     mkdir -p "$HOME/.ssh"; : > "$HOME/.ssh/agent-gate"
     printf 'GATE_1P_PASSPHRASE=pw\n' > "$XDG_CONFIG_HOME/agent-gate/config"
     printf 'Agent-Test\nops_tok\n' | bash "$REPO/bin/1p" enroll acme >/dev/null 2>&1
+    # Re-stub `op` (bypassing the harness's generic stub) so its log line records
+    # whether the 1p profile's tmpfs token already exists at the moment `op` is
+    # called — direct proof that sa unlocks before secret gates read through it.
+    cat > "$TMP/bin/op" <<'OPSTUB'
+#!/usr/bin/env bash
+present=0
+[[ -s "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token" ]] && present=1
+echo "op $* 1p_token_present=$present" >> "$XDG_RUNTIME_DIR/stub.log"
+echo v
+OPSTUB
+    chmod +x "$TMP/bin/op"
     unlock all 20m >/dev/null 2>&1
     log="$(stub_log)"
     op_line=$(grep -n '^op read' <<<"$log" | head -1 | cut -d: -f1)
     add_line=$(grep -n '^ssh-add -t' <<<"$log" | head -1 | cut -d: -f1)
     [[ -n "$op_line" && -n "$add_line" && "$op_line" -lt "$add_line" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL all order: secret($op_line) before agent($add_line)"; }
+    assert_contains "sa (1p) unlocked before secret gate's op read" "$log" "op read op://V/i/f 1p_token_present=1"
     assert_eq "1p unlocked first" "$(cat "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token")" "ops_tok"
     assert_contains "timeout passed to ssh-add" "$log" "ssh-add -t 20m"
     teardown
@@ -279,9 +349,12 @@ test_install_seeds_and_never_overwrites() {
     teardown
 }
 
-test_defaults; test_config_file_overrides; test_deprecated_env; test_timeout_parse_and_precedence; test_registry
-test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
-test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock; test_gate_ssh_locked_and_unlocked
+test_defaults; test_config_file_overrides; test_config_file_unbound_var_is_safe; test_double_source_is_safe
+test_deprecated_env; test_timeout_parse_and_precedence; test_registry
+test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
+test_secret_write_fails_closed; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
+test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock
+test_gate_ssh_locked_and_unlocked; test_gate_ssh_missing_key_or_sock
 test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_lock_all_and_enroll
 test_install_seeds_and_never_overwrites
 report

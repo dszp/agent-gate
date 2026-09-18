@@ -12,7 +12,7 @@ setup() {
     export PATH="$TMP/bin:$PATH"
     # Unset every knob a developer's shell might carry in.
     unset GATE_SSH_KEY GATE_SSH_SOCK GATE_OP_BIN GATE_DEFAULT_TIMEOUT GATE_OWNER \
-          GATE_RT_BASE GATE_DIR GATE_1P_RT GATE_1P_PASSPHRASE OP_BIN \
+          GATE_RT_BASE GATE_DIR GATE_1P_RT GATE_PASSPHRASE GATE_1P_PASSPHRASE OP_BIN \
           CLAUDE_UNLOCK_TIMEOUT CLAUDE_1P_TIMEOUT CLAUDE_1P_PASSPHRASE 2>/dev/null
     stub systemd-run 'exit 0'
     stub systemctl   'exit 0'
