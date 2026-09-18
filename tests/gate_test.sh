@@ -219,7 +219,9 @@ test_dispatcher_status_rows() {
     assert_contains "tok row"  "$out" "tok       LOCKED    unlock tok [timeout]"
     assert_contains "1p row"   "$out" "1p        LOCKED    no profiles enrolled"
     unlock tok 10m >/dev/null 2>&1
-    assert_contains "tok unlocked row" "$(unlock status)" "tok       UNLOCKED  ~9m 5"
+    row="$(unlock status | grep '^tok ')"
+    assert_contains "tok unlocked state" "$row" "tok       UNLOCKED  ~"
+    if [[ "$row" =~ ~(10m\ 00s|9m\ 5[0-9]s)\ left ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL tok remaining: [$row]"; fi
     teardown
 }
 
