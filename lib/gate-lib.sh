@@ -218,3 +218,10 @@ agent_lock() { # <name>
         echo "Already locked — no dedicated agent for $1."
     fi
 }
+
+# ---- kind: sa -----------------------------------------------------------------
+# 1p owns multi-profile state; the dispatcher delegates rather than duplicating it.
+sa_bin()    { printf '%s' "$GATE_LIB_DIR/../bin/1p"; }
+sa_status() { "$(sa_bin)" status 2>/dev/null; }
+sa_unlock() { shift; "$(sa_bin)" unlock "$@"; }   # <name> [profile] [timeout]
+sa_lock()   { "$(sa_bin)" lock; }

@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# 1p — scoped, passphrase-gated, auto-expiring, allowlisted access to 1Password
+# Service Account tokens (ops_...) for an agent, via the real `op` CLI.
+#
+#   1p enroll <profile>          one-time: encrypt a token at rest (the owner)
+#   1p unlock [profile] [t]      decrypt into tmpfs on a timer (the owner)
+#   1p lock   [profile]          scrub now (bare = all)
+#   1p status                    show lock state per profile
+#   1p read|inject|whoami · item/document get|list|create|edit|delete   (the agent)
+#
+# profile == the 1Password account subdomain. Gated verbs work ONLY while
+# unlocked; run/signin/org-admin stay blocked. The token never touches argv or
+# the caller's shell — only the child `op` process env. Part of agent-gate.
+# ==============================================================================
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/../lib/gate-lib.sh"
+gate_conf_load
+readonly ONEP_DIR="$GATE_CONF/1p"
+readonly RT_BASE="$GATE_1P_RT"
+readonly VERSION_TAG="OPSAv2"
+readonly OSSL=("${GATE_OSSL[@]}")
+readonly OP_BIN="$GATE_OP_BIN"
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; readonly SELF
+
+die() { echo "$@" >&2; exit 2; }
+
+valid_profile() { [[ -n "$1" && "$1" != */* && "$1" != *..* ]]; } # reject empty, '/', '..'
+
+show_help() { sed -n '4,14p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+get_pass() { # echoes passphrase (env hook for automation/tests, else prompt)
+    if [[ -n "${GATE_1P_PASSPHRASE:-}" ]]; then
+        printf '%s' "$GATE_1P_PASSPHRASE"
+    else
+        local p; read -rsp "1p gate passphrase: " p >&2; echo >&2
+        printf '%s' "$p"
+    fi
+}
+
+list_profiles() { # enrolled profile names, one per line
+    local f
+    for f in "$ONEP_DIR"/*.enc; do
+        [[ -e "$f" ]] || continue
+        basename "$f" .enc
+    done
+}
+
+is_enrolled() { [[ -e "$ONEP_DIR/$1.enc" ]]; }
+
+profile_unlocked() { # <profile> -> 0 if token present and not expired
+    local p="$1" rt now exp
+    rt="$RT_BASE/$p"
+    [[ -s "$rt/token" && -f "$rt/expiry" ]] || return 1
+    now=$(date +%s); exp=$(cat "$rt/expiry" 2>/dev/null || echo 0)
+    [[ "$now" -lt "$exp" ]]
+}
+
+cmd_status() {
+    local now p vaults exp rem any=1
+    now=$(date +%s)
+    local -a profiles; mapfile -t profiles < <(list_profiles)
+    [[ "${#profiles[@]}" -gt 0 ]] || { echo "No profiles enrolled. Enroll: 1p enroll <profile>"; return 1; }
+    for p in "${profiles[@]}"; do
+        vaults="?"; [[ -f "$RT_BASE/$p/meta" ]] && vaults="$(sed -n 's/^vaults=//p' "$RT_BASE/$p/meta")"
+        if profile_unlocked "$p"; then
+            exp=$(cat "$RT_BASE/$p/expiry"); rem=$(( exp - now )); any=0
+            printf 'UNLOCKED — %s (%s), ~%s left.  Lock: 1p lock %s\n' "$p" "$vaults" "$(gate_fmt_remaining "$rem")" "$p"
+        else
+            printf 'LOCKED   — %s (%s).  Unlock: 1p unlock %s\n' "$p" "$vaults" "$p"
+        fi
+    done
+    return $any
+}
+
+cmd_internal_token() { # <profile> -> token on stdout iff unlocked (accessor for the op auto-resolver)
+    local p="${1:-}"
+    [[ -n "$p" ]] || die "usage: 1p internal-token <profile>"
+    valid_profile "$p" || die "invalid profile name: $p"
+    profile_unlocked "$p" || { echo "LOCKED — $p not unlocked" >&2; exit 3; }
+    cat "$RT_BASE/$p/token"
+}
+
+cmd_profiles() { list_profiles; } # enrolled profile names, one per line (non-secret)
+
+cmd_vaults() { # <profile> -> that profile's vaults= csv from tmpfs meta (unlocked only); rc=1 if not unlocked
+    local p="${1:-}"
+    [[ -n "$p" ]] || die "usage: 1p _vaults <profile>"
+    valid_profile "$p" || die "invalid profile name: $p"
+    [[ -f "$RT_BASE/$p/meta" ]] || return 1
+    sed -n 's/^vaults=//p' "$RT_BASE/$p/meta"
+}
+
+cmd_enroll() {
+    local p="${1:-}"
+    [[ -n "$p" ]] || die "usage: 1p enroll <profile>   (profile = account subdomain, e.g. example-team)"
+    valid_profile "$p" || die "invalid profile name: $p"
+    umask 077; mkdir -p "$ONEP_DIR"
+    local enc="$ONEP_DIR/$p.enc"
+    if [[ -e "$enc" ]]; then
+        read -rp "Profile '$p' already enrolled. Overwrite? [y/N] " ans
+        [[ "$ans" == [yY]* ]] || { echo "Keeping existing token for $p."; exit 0; }
+    fi
+    local vaults token pass
+    read -rp "Vault name(s) this token can read (comma-separated): " vaults
+    [[ -n "$vaults" ]] || die "no vaults entered — aborting"
+    read -rsp "Paste the 1Password Service Account token (ops_..., hidden): " token; echo
+    [[ "$token" == ops_* ]] || die "that doesn't look like a service account token (expected ops_...)"
+    pass="$(get_pass)"
+    [[ -n "$pass" ]] || die "empty passphrase — aborting"
+    printf '%s\n%s\n%s\n' "$VERSION_TAG" "vaults=$vaults" "token=$token" \
+        | GATE_1P_PASSPHRASE="$pass" openssl enc "${OSSL[@]}" -salt \
+              -pass env:GATE_1P_PASSPHRASE -out "$enc"
+    unset token pass
+    chmod 600 "$enc"
+    echo "Enrolled -> $enc (encrypted, mode 600)."
+    echo "Validate:  1p unlock $p 15m   &&   1p -p $p whoami"
+}
+
+decrypt_profile() { # <profile> <pass> -> plaintext blob on stdout (rc≠0 on failure)
+    local p="$1" pass="$2"
+    GATE_1P_PASSPHRASE="$pass" openssl enc -d "${OSSL[@]}" \
+        -pass env:GATE_1P_PASSPHRASE -in "$ONEP_DIR/$p.enc" 2>/dev/null
+}
+
+unlock_one() { # <profile> <pass> <secs> <label>  -> rc≠0 on failure
+    local p="$1" pass="$2" secs="$3" tlabel="$4" blob vaults token
+    blob="$(decrypt_profile "$p" "$pass")" \
+        || { echo "wrong passphrase or corrupt creds — $p NOT unlocked" >&2; return 1; }
+    [[ "${blob%%$'\n'*}" == "$VERSION_TAG" ]] \
+        || { echo "wrong passphrase or bad version — $p NOT unlocked" >&2; return 1; }
+    vaults="$(printf '%s\n' "$blob" | sed -n 's/^vaults=//p')"
+    token="$(printf '%s\n' "$blob" | sed -n 's/^token=//p')"
+    [[ "$token" == ops_* ]] || { echo "decrypted token malformed — $p NOT unlocked" >&2; return 1; }
+    local rt="$RT_BASE/$p"; mkdir -p "$rt"
+    printf '%s' "$token"        > "$rt/token"; chmod 600 "$rt/token"
+    printf 'vaults=%s\n' "$vaults" > "$rt/meta";  chmod 600 "$rt/meta"
+    echo $(( $(date +%s) + secs )) > "$rt/expiry"; chmod 600 "$rt/expiry"
+    unset token
+    systemctl --user stop "agent-gate-1p-lock-$p.timer"          >/dev/null 2>&1 || true
+    systemctl --user reset-failed "agent-gate-1p-lock-$p.service" >/dev/null 2>&1 || true
+    systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-1p-lock-$p" \
+        "$SELF" lock "$p" >/dev/null 2>&1 \
+        || echo "(note: auto-lock timer for $p not scheduled; expiry still enforced on use)"
+    echo "Unlocked $p ($vaults) for $tlabel. Lock early: 1p lock $p"
+}
+
+cmd_lock() {
+    local -a targets
+    if [[ -n "${1:-}" ]]; then targets=("$1"); else mapfile -t targets < <(list_profiles); fi
+    local p rt
+    for p in "${targets[@]}"; do
+        rt="$RT_BASE/$p"
+        [[ -f "$rt/token" ]] && { shred -u "$rt/token" 2>/dev/null || rm -f "$rt/token"; }
+        rm -f "$rt/expiry" "$rt/meta" 2>/dev/null
+        systemctl --user stop "agent-gate-1p-lock-$p.timer"          >/dev/null 2>&1
+        systemctl --user reset-failed "agent-gate-1p-lock-$p.service" >/dev/null 2>&1
+    done
+    echo "1p locked${1:+: $1}."
+}
+
+cmd_unlock() {
+    local a1="${1:-}" a2="${2:-}" profile timeout
+    if [[ -n "$a2" ]]; then
+        profile="$a1"; timeout="$a2"
+    elif [[ -n "$a1" ]]; then
+        if [[ "$a1" == "all" ]] || is_enrolled "$a1"; then
+            profile="$a1"; timeout="$(gate_timeout_for 1p)"
+        else
+            profile=""; timeout="$a1"
+        fi
+    else
+        profile=""; timeout="$(gate_timeout_for 1p)"
+    fi
+    local -a targets
+    if [[ "$profile" == "all" ]]; then
+        mapfile -t targets < <(list_profiles)
+    elif [[ -n "$profile" ]]; then
+        valid_profile "$profile" || die "invalid profile name: $profile"
+        is_enrolled "$profile" || die "not enrolled: $profile"
+        targets=("$profile")
+    else
+        # no profile specified -> unlock ALL enrolled profiles with one shared passphrase
+        mapfile -t targets < <(list_profiles)
+    fi
+    [[ "${#targets[@]}" -gt 0 ]] || die "no profiles enrolled. Run: 1p enroll <profile>"
+    local secs; secs="$(gate_parse_timeout "$timeout")" || exit 2
+    local pass; pass="$(get_pass)"
+    umask 077
+    local p failed=0
+    for p in "${targets[@]}"; do unlock_one "$p" "$pass" "$secs" "$timeout" || failed=1; done
+    unset pass
+    [[ "$failed" -eq 0 ]] || exit 1
+}
+
+vault_of_args() { # scan for op://VAULT/... or `--vault V`; echo vault, rc≠0 if none
+    local prev="" a rest
+    for a in "$@"; do
+        case "$a" in
+            op://*) rest="${a#op://}"; printf '%s' "${rest%%/*}"; return 0;;
+        esac
+        [[ "$prev" == "--vault" ]] && { printf '%s' "$a"; return 0; }
+        prev="$a"
+    done
+    return 1
+}
+
+route_profile() { # <force> <opargs...> -> profile on stdout; exit 2/3 on failure
+    local force="$1"; shift
+    if [[ -n "$force" ]]; then
+        valid_profile "$force" || die "invalid profile name: $force"
+        is_enrolled "$force" || die "not enrolled: $force"
+        profile_unlocked "$force" \
+            || { echo "LOCKED — 1p gate not unlocked for $force. $GATE_OWNER must run: 1p unlock $force" >&2; exit 3; }
+        printf '%s' "$force"; return 0
+    fi
+    local -a unlocked=(); local p
+    while IFS= read -r p; do profile_unlocked "$p" && unlocked+=("$p"); done < <(list_profiles)
+    [[ "${#unlocked[@]}" -gt 0 ]] \
+        || { echo "LOCKED — no 1p profile unlocked. $GATE_OWNER must run: 1p unlock [profile]" >&2; exit 3; }
+    if [[ "${#unlocked[@]}" -eq 1 ]]; then printf '%s' "${unlocked[0]}"; return 0; fi
+    local v; v="$(vault_of_args "$@")" \
+        || die "multiple profiles unlocked; specify -p <profile> (${unlocked[*]})"
+    local match="" vaults
+    for p in "${unlocked[@]}"; do
+        vaults="$(sed -n 's/^vaults=//p' "$RT_BASE/$p/meta")"
+        case ",$vaults," in
+            *",$v,"*) [[ -n "$match" ]] && die "vault '$v' in multiple profiles; specify -p <profile>"; match="$p";;
+        esac
+    done
+    [[ -n "$match" ]] || die "no unlocked profile serves vault '$v'; specify -p <profile> (${unlocked[*]})"
+    printf '%s' "$match"
+}
+
+run_op() { # <force> <verb> <args...>
+    local force="$1" verb="$2"; shift 2
+    # Allowlist: reads + item/document CRUD + (forward-compat) environment reads.
+    # Intentionally NOT allowed: run (arbitrary command exec), signin, and the
+    # org/identity admin verbs (account/user/group/service-account/vault/connect).
+    case "$verb" in
+        read|inject|whoami) ;;
+        environment) case "${1:-}" in read|ls|list) ;; *) die "blocked by 1p gate: environment allows read|ls";; esac;;
+        item)     case "${1:-}" in get|list|create|edit|delete|template) ;; *) die "blocked by 1p gate: item allows get|list|create|edit|delete|template";; esac;;
+        document) case "${1:-}" in get|create|edit|delete) ;;              *) die "blocked by 1p gate: document allows get|create|edit|delete";; esac;;
+        *) die "blocked by 1p gate: '$verb' — allowed: read, inject, whoami, environment read|ls, item {get|list|create|edit|delete|template}, document {get|create|edit|delete}; blocked: run/signin/vault/account/user/group/service-account";;
+    esac
+    local -a opargs=("$verb" "$@")
+    # whoami with no forced profile and 2+ unlocked -> report EVERY unlocked profile
+    if [[ "$verb" == "whoami" && -z "$force" ]]; then
+        local -a unlocked=(); local up
+        while IFS= read -r up; do profile_unlocked "$up" && unlocked+=("$up"); done < <(list_profiles)
+        if [[ "${#unlocked[@]}" -gt 1 ]]; then
+            local rc=0 first=1
+            for up in "${unlocked[@]}"; do
+                [[ "$first" -eq 1 ]] || echo; first=0
+                echo "== $up =="
+                OP_SERVICE_ACCOUNT_TOKEN="$(cat "$RT_BASE/$up/token")" "$OP_BIN" "${opargs[@]}" || rc=$?
+            done
+            return "$rc"
+        fi
+    fi
+    local prof; prof="$(route_profile "$force" "${opargs[@]}")" || exit $?
+    OP_SERVICE_ACCOUNT_TOKEN="$(cat "$RT_BASE/$prof/token")" "$OP_BIN" "${opargs[@]}"
+}
+
+# ---- dispatch ---------------------------------------------------------------
+FORCE=""
+while [[ "${1:-}" == "-p" || "${1:-}" == "--profile" ]]; do
+    FORCE="${2:-}"; shift 2 || die "usage: 1p -p <profile> <verb> ..."
+done
+
+cmd="${1:-help}"; [[ $# -gt 0 ]] && shift
+case "$cmd" in
+    help|-h|--help) show_help; exit 0;;
+    status)         cmd_status "$@";;
+    internal-token) cmd_internal_token "$@";;
+    _profiles)      cmd_profiles "$@";;
+    _vaults)        cmd_vaults "$@";;
+    enroll)         cmd_enroll "$@";;
+    unlock)         cmd_unlock "$@";;
+    lock)           cmd_lock "$@";;
+    read|inject|whoami|item|document|environment|\
+    run|signin|signout|account|connect|events-api|group|service-account|user|vault|plugin|update)
+                    run_op "$FORCE" "$cmd" "$@";;
+    *)              die "unknown command: $cmd";;
+esac
