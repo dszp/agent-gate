@@ -74,15 +74,11 @@ gate_load_gates() { # source built-ins, then private drop-ins (each dir sorted)
 
 # ---- timeouts -----------------------------------------------------------------
 gate_parse_timeout() { # <spec> -> seconds; rc=2 on malformed. Mirrors `ssh-add -t`.
-    local t="$1" secs
-    case "$t" in
-        *w) secs=$(( ${t%w} * 604800 ));;  *d) secs=$(( ${t%d} * 86400 ));;
-        *h) secs=$(( ${t%h} * 3600 ));;    *m) secs=$(( ${t%m} * 60 ));;
-        *s) secs=$(( ${t%s} ));;
-        *[!0-9]*) echo "agent-gate: bad timeout '$t' (use 900, 15m, 1h, 2d)" >&2; return 2;;
-        *)  secs="$t";;
-    esac 2>/dev/null
-    [[ "$secs" =~ ^[0-9]+$ && "$secs" -gt 0 ]] || { echo "agent-gate: timeout must be > 0 (got '$t')" >&2; return 2; }
+    local t="$1" n unit secs
+    if [[ "$t" =~ ^([0-9]+)([smhdw]?)$ ]]; then n="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
+    else echo "agent-gate: bad timeout '$t' (use 900, 15m, 1h, 2d)" >&2; return 2; fi
+    case "$unit" in w) secs=$((n*604800));; d) secs=$((n*86400));; h) secs=$((n*3600));; m) secs=$((n*60));; *) secs="$n";; esac
+    [[ "$secs" -gt 0 ]] || { echo "agent-gate: timeout must be > 0 (got '$t')" >&2; return 2; }
     printf '%s' "$secs"
 }
 
