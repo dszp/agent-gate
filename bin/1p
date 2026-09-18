@@ -27,10 +27,12 @@ die() { echo "$@" >&2; exit 2; }
 
 valid_profile() { [[ -n "$1" && "$1" != */* && "$1" != *..* ]]; } # reject empty, '/', '..'
 
-show_help() { sed -n '4,14p' "$SELF" | sed 's/^# \{0,1\}//'; }
+show_help() { sed -n '3,14p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 get_pass() { # echoes passphrase (env hook for automation/tests, else prompt)
-    if [[ -n "${GATE_1P_PASSPHRASE:-}" ]]; then
+    if [[ -n "${GATE_PASSPHRASE:-}" ]]; then
+        printf '%s' "$GATE_PASSPHRASE"
+    elif [[ -n "${GATE_1P_PASSPHRASE:-}" ]]; then
         printf '%s' "$GATE_1P_PASSPHRASE"
     else
         local p; read -rsp "1p gate passphrase: " p >&2; echo >&2
@@ -132,10 +134,16 @@ unlock_one() { # <profile> <pass> <secs> <label>  -> rc≠0 on failure
     vaults="$(printf '%s\n' "$blob" | sed -n 's/^vaults=//p')"
     token="$(printf '%s\n' "$blob" | sed -n 's/^token=//p')"
     [[ "$token" == ops_* ]] || { echo "decrypted token malformed — $p NOT unlocked" >&2; return 1; }
-    local rt="$RT_BASE/$p"; mkdir -p "$rt"
-    printf '%s' "$token"        > "$rt/token"; chmod 600 "$rt/token"
-    printf 'vaults=%s\n' "$vaults" > "$rt/meta";  chmod 600 "$rt/meta"
-    echo $(( $(date +%s) + secs )) > "$rt/expiry"; chmod 600 "$rt/expiry"
+    local rt="$RT_BASE/$p"
+    if ! mkdir -p "$rt" \
+        || ! printf '%s' "$token"           > "$rt/token" \
+        || ! printf 'vaults=%s\n' "$vaults"  > "$rt/meta" \
+        || ! echo $(( $(date +%s) + secs ))  > "$rt/expiry"; then
+        unset token
+        echo "1p: cannot write $rt" >&2
+        return 1
+    fi
+    chmod 600 "$rt/token" "$rt/meta" "$rt/expiry"
     unset token
     systemctl --user stop "agent-gate-1p-lock-$p.timer"          >/dev/null 2>&1 || true
     systemctl --user reset-failed "agent-gate-1p-lock-$p.service" >/dev/null 2>&1 || true
@@ -166,8 +174,11 @@ cmd_unlock() {
     elif [[ -n "$a1" ]]; then
         if [[ "$a1" == "all" ]] || is_enrolled "$a1"; then
             profile="$a1"; timeout="$(gate_timeout_for 1p)"
-        else
+        elif gate_parse_timeout "$a1" >/dev/null 2>&1; then
             profile=""; timeout="$a1"
+        else
+            local -a _profs; mapfile -t _profs < <(list_profiles)
+            die "1p: '$a1' is not an enrolled profile or a timeout (profiles: ${_profs[*]})"
         fi
     else
         profile=""; timeout="$(gate_timeout_for 1p)"
