@@ -12,6 +12,12 @@
 # Your name, shown to the agent in LOCKED messages ("Ask Alice to run: unlock ssh").
 #GATE_OWNER="the owner"
 # tmpfs root for unlocked tokens. Must be memory-backed and per-user.
-#GATE_RT_BASE="$XDG_RUNTIME_DIR"
+#GATE_RT_BASE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # Where your own gate files live (one file per gate, see examples/gates.d/).
 #GATE_DIR="$GATE_CONF/gates.d"
+# Where the 1p gate keeps its unlocked profile tokens (under GATE_RT_BASE).
+#GATE_1P_RT="$GATE_RT_BASE/agent-gate/1p"
+# Automation hook: skip every passphrase prompt and use this value instead
+# (alias: GATE_1P_PASSPHRASE). For tests and scripts ONLY — never set this in
+# this file on a real machine, it disables the prompt agent-gate exists for.
+#GATE_PASSPHRASE=
