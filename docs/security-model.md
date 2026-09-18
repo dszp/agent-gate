@@ -38,6 +38,14 @@ Two consequences follow. First, the gates limit what an *unlocked state* grants 
 
 ## What lands in tmpfs, and when it's scrubbed
 
-`sa` and `secret` write their decrypted plaintext under `$GATE_RT_BASE` (memory-backed storage, by default the user's `XDG_RUNTIME_DIR`), alongside an expiry timestamp. Nothing is written to disk.
+`sa` and `secret` write their decrypted plaintext under `$GATE_RT_BASE` (memory-backed storage, by default the user's `XDG_RUNTIME_DIR`), alongside an expiry timestamp. Nothing is written to disk — **but the no-disk / no-reboot-survival claim holds only when `GATE_RT_BASE` actually points at memory-backed storage.** The tool checks this after every write (`stat -f -c %T`) and warns to stderr when the mountpoint is neither `tmpfs` nor `ramfs`; if you've pointed `GATE_RT_BASE` at a real disk path, the token is plaintext on that disk until locked, reboot or not.
 
-Each unlock schedules a timer that runs `lock` for that gate when the grant expires, and every read of a `secret` gate's remaining time re-checks the expiry itself, so an unenforced timer isn't the only thing standing between an agent and a stale credential. Locking early, or letting the timer fire, deletes the token file with `shred -u` (falling back to a plain `rm` if `shred` isn't available) and removes the expiry file. Nothing decrypted by these two gate kinds outlives its grant or survives a reboot.
+Each unlock schedules a timer (`systemd-run --user`) that runs `lock` for that gate when the grant expires, and every read of a `secret` gate's remaining time re-checks the expiry itself, so an unenforced timer isn't the only thing standing between an agent and a stale credential. Locking early, or letting the timer fire, deletes the token file with `shred -u` (falling back to a plain `rm` if `shred` isn't available) and removes the expiry file.
+
+**When `systemd-run` is unavailable** (no systemd user session — some containers, some minimal servers), the autolock timer silently can't be scheduled and nothing scrubs the plaintext when the grant's `expiry` timestamp passes. The only enforcement left is that every consumer must re-check `expiry` itself before trusting the token — which `1p`, `unlock status`, and `secret_remaining` all do — so a stale-but-unexpired-by-clock token is never *served*, but it also isn't *deleted*. On a non-systemd host, run `lock` (or `lock <gate>`) by hand when you're done; don't rely on the timer.
+
+## The automation passphrase hook: `GATE_PASSPHRASE`
+
+Every passphrase prompt in agent-gate (the `secret` blob passphrase, the `1p` gate passphrase) first checks the environment variable `GATE_PASSPHRASE` (alias `GATE_1P_PASSPHRASE`, kept for compatibility — set either and both are honored) before falling back to an interactive `read`. This exists so tests and scripts can drive an unlock non-interactively.
+
+**Never set `GATE_PASSPHRASE` in the config file, or in any shell environment a long-lived or automated process inherits, on a real machine.** Doing so defeats the entire point of the passphrase step described above: it turns the gate back into a standing credential with no owner-controlled expiry, available to anything running as your uid. It belongs in a test harness's process environment and nowhere else.
