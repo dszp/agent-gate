@@ -204,7 +204,64 @@ test_gate_ssh_locked_and_unlocked() {
     teardown
 }
 
+_disp_setup() {
+    setup; export GATE_BUILTIN_DIR="$REPO/gates.d"
+    echo 'gate_register tok secret ref=op://V/i/f' > "$XDG_CONFIG_HOME/agent-gate/gates.d/tok.sh"
+    stub ssh-add 'exit 2'; stub ssh-agent 'exit 0'; stub op 'echo v'
+}
+unlock() { bash "$REPO/bin/unlock" "$@"; }
+lock()   { bash "$REPO/bin/lock" "$@"; }
+
+test_dispatcher_status_rows() {
+    _disp_setup
+    out="$(unlock status)"
+    assert_contains "ssh row"  "$out" "ssh       LOCKED    unlock ssh [timeout]"
+    assert_contains "tok row"  "$out" "tok       LOCKED    unlock tok [timeout]"
+    assert_contains "1p row"   "$out" "1p        LOCKED    no profiles enrolled"
+    unlock tok 10m >/dev/null 2>&1
+    assert_contains "tok unlocked row" "$(unlock status)" "tok       UNLOCKED  ~9m 5"
+    teardown
+}
+
+test_dispatcher_bare_never_unlocks() {
+    _disp_setup
+    out="$(unlock)"; assert_contains "bare shows usage" "$out" "Usage:"
+    assert_file_absent "bare unlock wrote nothing" "$XDG_RUNTIME_DIR/agent-gate/tok/token"
+    unlock bogus >/dev/null 2>&1; assert_exit "unknown gate rc" "$?" "2"
+    teardown
+}
+
+test_dispatcher_unlock_all_order() {
+    _disp_setup
+    mkdir -p "$HOME/.ssh"; : > "$HOME/.ssh/agent-gate"
+    printf 'GATE_1P_PASSPHRASE=pw\n' > "$XDG_CONFIG_HOME/agent-gate/config"
+    printf 'Agent-Test\nops_tok\n' | bash "$REPO/bin/1p" enroll acme >/dev/null 2>&1
+    unlock all 20m >/dev/null 2>&1
+    log="$(stub_log)"
+    op_line=$(grep -n '^op read' <<<"$log" | head -1 | cut -d: -f1)
+    add_line=$(grep -n '^ssh-add -t' <<<"$log" | head -1 | cut -d: -f1)
+    [[ -n "$op_line" && -n "$add_line" && "$op_line" -lt "$add_line" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL all order: secret($op_line) before agent($add_line)"; }
+    assert_eq "1p unlocked first" "$(cat "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token")" "ops_tok"
+    assert_contains "timeout passed to ssh-add" "$log" "ssh-add -t 20m"
+    teardown
+}
+
+test_dispatcher_lock_all_and_enroll() {
+    _disp_setup
+    unlock tok 10m >/dev/null 2>&1
+    mkdir -p "$HOME/.ssh"; python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$HOME/.ssh/agent-gate.sock"
+    lock >/dev/null 2>&1
+    assert_file_absent "lock all scrubbed tok" "$XDG_RUNTIME_DIR/agent-gate/tok/token"
+    assert_contains "lock all hit ssh" "$(stub_log)" "ssh-add -D"
+    out="$(printf 's\n' | GATE_1P_PASSPHRASE=pw unlock tok enroll 2>&1)"; rc=$?
+    assert_exit "enroll via dispatcher rc" "$rc" "0"
+    [[ -f "$XDG_CONFIG_HOME/agent-gate/tok.enc" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL enroll blob missing"; }
+    unlock ssh enroll >/dev/null 2>&1; assert_exit "enroll on agent kind rc" "$?" "2"
+    teardown
+}
+
 test_defaults; test_config_file_overrides; test_deprecated_env; test_timeout_parse_and_precedence; test_registry
 test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock; test_gate_ssh_locked_and_unlocked
+test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_lock_all_and_enroll
 report

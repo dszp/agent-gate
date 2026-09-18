@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# unlock / lock — one front door for every gate.  (bin/lock is a symlink here.)
+#
+#   unlock                    status + usage (never silently unlocks anything)
+#   unlock status             every registered gate in one table
+#   unlock <gate> [timeout]   ssh prompts for the key passphrase; secret gates pull
+#                             from 1Password or fall back to their enrolled blob
+#   unlock 1p [profile] [t]   delegates to `1p unlock`
+#   unlock <gate> enroll      (secret gates) write the encrypted blob
+#   unlock all [timeout]      1p -> secret gates -> ssh   (two prompts at most)
+#   lock [gate]               bare `lock` locks everything
+# Gates are discovered from gates.d/ (built-in) and $GATE_DIR (yours).
+# ==============================================================================
+set -uo pipefail
+. "$(dirname "$(readlink -f "$0")")/../lib/gate-lib.sh"
+gate_conf_load; gate_load_gates
+
+usage() {
+    cat <<EOF
+Usage:
+  unlock <gate> [timeout]     lock <gate>
+  unlock all    [timeout]     lock            (bare \`lock\` = lock all)
+  unlock <gate> enroll        (secret gates: store the encrypted blob)
+  unlock status
+
+Gates: ${GATE_NAMES[*]}  (also: all)
+Timeouts: 900 | 15m | 1h | 2d      default $GATE_DEFAULT_TIMEOUT
+EOF
+}
+
+cmd_status() {
+    local g rem line
+    printf '%-9s %-9s %s\n' GATE STATE DETAIL
+    printf '%-9s %-9s %s\n' ------- ------- ------------------------------------------
+    for g in "${GATE_NAMES[@]}"; do
+        case "$(gate_kind "$g")" in
+            agent)
+                if agent_status "$g"; then printf '%-9s %-9s %s\n' "$g" UNLOCKED "key loaded (agent owns expiry)"
+                else                       printf '%-9s %-9s %s\n' "$g" LOCKED   "unlock $g [timeout]"; fi ;;
+            secret)
+                if rem="$(secret_remaining "$g")"; then printf '%-9s %-9s %s\n' "$g" UNLOCKED "~$(gate_fmt_remaining "$rem") left"
+                else                                    printf '%-9s %-9s %s\n' "$g" LOCKED   "unlock $g [timeout]"; fi ;;
+            sa)
+                local any=0
+                while IFS= read -r line; do
+                    case "$line" in
+                        UNLOCKED*) any=1; printf '%-9s %-9s %s\n' "$g" UNLOCKED "${line#UNLOCKED — }" ;;
+                        LOCKED*)   any=1; printf '%-9s %-9s %s\n' "$g" LOCKED   "${line#LOCKED   — }" ;;
+                    esac
+                done < <(sa_status "$g")
+                [[ $any -eq 1 ]] || printf '%-9s %-9s %s\n' "$g" LOCKED "no profiles enrolled" ;;
+        esac
+    done
+}
+
+unlock_one() { # <gate> [args...]
+    local g="$1"; shift
+    gate_known "$g" || gate_die "unknown gate: $g  (try: unlock --help)"
+    local kind; kind="$(gate_kind "$g")"
+    if [[ "${1:-}" == enroll ]]; then
+        [[ "$kind" == secret ]] || gate_die "enroll applies to secret gates only ($g is $kind)"
+        secret_enroll "$g"; return $?
+    fi
+    case "$kind" in
+        agent)  local t; t="$(gate_timeout_for "$g" "${1:-}")"; gate_parse_timeout "$t" >/dev/null || exit 2
+                agent_unlock "$g" "$t" ;;
+        secret) local t; t="$(gate_timeout_for "$g" "${1:-}")"
+                secret_unlock "$g" "$t"; local rc=$?; [[ $rc -eq 2 ]] && exit 2; return $rc ;;
+        sa)     sa_unlock "$g" "$@" ;;
+    esac
+}
+
+unlock_all() { # [timeout] — sa first (one passphrase), then secret (fed by 1p), then agent last
+    local t="${1:-}" g kind
+    for kind in sa secret agent; do
+        for g in "${GATE_NAMES[@]}"; do
+            [[ "$(gate_kind "$g")" == "$kind" ]] || continue
+            echo "== $g =="
+            ( unlock_one "$g" ${t:+"$t"} ) || echo "($g not unlocked)" >&2
+        done
+    done
+    echo; cmd_status
+}
+
+lock_one() { # <gate>
+    gate_known "$1" || gate_die "unknown gate: $1"
+    case "$(gate_kind "$1")" in agent) agent_lock "$1";; secret) secret_lock "$1";; sa) sa_lock "$1";; esac
+}
+
+cmd_lock() {
+    local g
+    if [[ $# -eq 0 || "${1:-}" == all ]]; then for g in "${GATE_NAMES[@]}"; do lock_one "$g"; done; return 0; fi
+    lock_one "$1"
+}
+
+cmd_unlock() {
+    [[ $# -gt 0 ]] || { cmd_status; echo; usage; return 0; }
+    local g="$1"; shift
+    case "$g" in
+        status)         cmd_status ;;
+        -h|--help|help) usage ;;
+        all)            unlock_all "${1:-}" ;;
+        *)              unlock_one "$g" "$@" ;;
+    esac
+}
+
+case "$(basename "$0")" in
+    lock)   cmd_lock   "$@" ;;
+    unlock) cmd_unlock "$@" ;;
+    *)      case "${1:-}" in unlock) shift; cmd_unlock "$@";; lock) shift; cmd_lock "$@";; *) usage; exit 2;; esac ;;
+esac
