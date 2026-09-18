@@ -98,3 +98,90 @@ gate_fmt_remaining() { # <seconds> -> "1h 04m" / "12m 30s"
     if [[ "$s" -ge 3600 ]]; then printf '%dh %02dm' $(( s / 3600 )) $(( (s % 3600) / 60 ))
     else printf '%dm %02ds' $(( s / 60 )) $(( s % 60 )); fi
 }
+
+# ---- kind: secret -------------------------------------------------------------
+readonly GATE_OSSL=(-aes-256-cbc -pbkdf2 -iter 600000)
+
+gate_read_pass() { # <label> -> passphrase on stdout. GATE_1P_PASSPHRASE is the automation/test hook.
+    if [[ -n "${GATE_1P_PASSPHRASE:-}" ]]; then printf '%s' "$GATE_1P_PASSPHRASE"; return 0; fi
+    local p; read -rsp "$1 gate passphrase: " p >&2; echo >&2; printf '%s' "$p"
+}
+
+secret_rt()      { printf '%s' "$(gate_opt "$1" rt "$GATE_RT_BASE/agent-gate/$1")"; }
+secret_tokfile() { printf '%s' "$(gate_opt "$1" tokfile token)"; }
+secret_blob()    { printf '%s' "$(gate_opt "$1" blob "$GATE_CONF/$1.enc")"; }
+secret_magic()   { printf '%s' "$(gate_opt "$1" magic "$(tr '[:lower:]-' '[:upper:]_' <<<"$1")v1:")"; }
+secret_label()   { printf '%s' "$(gate_opt "$1" label "$(tr '[:lower:]' '[:upper:]' <<<"$1")")"; }
+
+secret_remaining() { # <name> -> seconds left; rc=1 if locked/expired
+    local rt tok exp now e; rt="$(secret_rt "$1")"; tok="$rt/$(secret_tokfile "$1")"; exp="$rt/expiry"
+    [[ -s "$tok" && -f "$exp" ]] || return 1
+    now=$(date +%s); e=$(cat "$exp" 2>/dev/null || echo 0)
+    [[ "$now" -lt "$e" ]] || return 1
+    printf '%s' $(( e - now ))
+}
+
+_secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock timer
+    local name="$1" secret="$2" secs="$3" rt tok
+    rt="$(secret_rt "$name")"; tok="$rt/$(secret_tokfile "$name")"
+    umask 077; mkdir -p "$rt"
+    printf '%s' "$secret" > "$tok"; chmod 600 "$tok"
+    echo $(( $(date +%s) + secs )) > "$rt/expiry"; chmod 600 "$rt/expiry"
+    systemctl --user stop "agent-gate-lock-$name.timer"           >/dev/null 2>&1
+    systemctl --user reset-failed "agent-gate-lock-$name.service" >/dev/null 2>&1
+    systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-lock-$name" \
+        "$GATE_LIB_DIR/../bin/lock" "$name" >/dev/null 2>&1 \
+        || echo "(note: auto-lock timer for $name couldn't be scheduled; expiry is still enforced on use)" >&2
+}
+
+_secret_from_ref() { # <name> -> secret on stdout; rc=1 if no ref or unresolvable
+    local ref val; ref="$(gate_opt "$1" ref)"; [[ -n "$ref" ]] || return 1
+    val="$("$GATE_OP_BIN" read "$ref" 2>/dev/null)" || return 1
+    [[ -n "$val" ]] || return 1
+    printf '%s' "$val"
+}
+
+_secret_from_blob() { # <name> -> secret on stdout; PROMPTS. rc=1 wrong pass / no blob
+    local name="$1" blob magic plain
+    blob="$(secret_blob "$name")"; magic="$(secret_magic "$name")"
+    [[ -f "$blob" ]] || { echo "No enrolled secret for $name at $blob. Enroll with: unlock $name enroll" >&2; return 1; }
+    echo "Enter the $(secret_label "$name") gate passphrase:" >&2
+    plain="$(GATE_PASS="$(gate_read_pass "$(secret_label "$name")")" openssl enc -d "${GATE_OSSL[@]}" -pass env:GATE_PASS -in "$blob" 2>/dev/null)"
+    [[ $? -eq 0 && "$plain" == "$magic"* ]] || { echo "Wrong passphrase or corrupt blob — $name NOT unlocked." >&2; return 1; }
+    printf '%s' "${plain#"$magic"}"
+}
+
+secret_unlock() { # <name> <timeout-spec>  rc: 0 ok | 1 failed | 2 bad timeout
+    local name="$1" spec="$2" secs secret
+    secs="$(gate_parse_timeout "$spec")" || return 2
+    if secret="$(_secret_from_ref "$name")"; then
+        _secret_write "$name" "$secret" "$secs"
+        echo "Unlocked $name for $spec (from 1Password). Lock early: lock $name"; return 0
+    fi
+    [[ -n "$(gate_opt "$name" ref)" ]] && echo "Couldn't reach 1Password for $name — falling back to the passphrase prompt." >&2
+    secret="$(_secret_from_blob "$name")" || return 1
+    _secret_write "$name" "$secret" "$secs"
+    echo "Unlocked $name for $spec (from the enrolled blob). Lock early: lock $name"
+}
+
+secret_enroll() { # <name> — secret on stdin (one line) or prompted; passphrase via gate_read_pass
+    local name="$1" blob magic secret pass
+    blob="$(secret_blob "$name")"; magic="$(secret_magic "$name")"
+    if [[ -t 0 ]]; then read -rsp "Paste the $(secret_label "$name") secret (hidden): " secret; echo >&2
+    else IFS= read -r secret; fi
+    [[ -n "$secret" ]] || { echo "empty secret — aborting" >&2; return 1; }
+    pass="$(gate_read_pass "$(secret_label "$name")")"; [[ -n "$pass" ]] || { echo "empty passphrase — aborting" >&2; return 1; }
+    umask 077; mkdir -p "$(dirname "$blob")"
+    printf '%s%s' "$magic" "$secret" | GATE_PASS="$pass" openssl enc "${GATE_OSSL[@]}" -salt -pass env:GATE_PASS -out "$blob" || return 1
+    chmod 600 "$blob"; unset secret pass
+    echo "Enrolled $name -> $blob (encrypted, mode 600). Test: unlock $name 15m"
+}
+
+secret_lock() { # <name>
+    local rt tok; rt="$(secret_rt "$1")"; tok="$rt/$(secret_tokfile "$1")"
+    [[ -f "$tok" ]] && { shred -u "$tok" 2>/dev/null || rm -f "$tok"; }
+    rm -f "$rt/expiry"
+    systemctl --user stop "agent-gate-lock-$1.timer"           >/dev/null 2>&1
+    systemctl --user reset-failed "agent-gate-lock-$1.service" >/dev/null 2>&1
+    echo "Locked $1."
+}
