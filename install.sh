@@ -10,7 +10,7 @@ for b in unlock lock gate-ssh 1p; do
     ln -sfn "$HERE/bin/$b" "$BIN/$b"; echo "linked $BIN/$b"
 done
 if [[ ! -e "$CONF/config" ]]; then cp "$HERE/examples/config" "$CONF/config"; chmod 600 "$CONF/config"; echo "seeded $CONF/config"; fi
-chmod 700 "$CONF" "$CONF/1p"
+chmod 700 "$CONF" "$CONF/1p" "$CONF/gates.d"
 cat <<EOF
 
 Next:
