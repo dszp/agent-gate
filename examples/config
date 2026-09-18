@@ -1,0 +1,17 @@
+# agent-gate config — sourced by every command. Assignments here win over the environment.
+# Uncomment to change a default.
+
+# The passphrase-protected key the agent may use while `unlock ssh` is in effect.
+#GATE_SSH_KEY=~/.ssh/agent-gate
+# The dedicated ssh-agent socket. Only gate-ssh uses it.
+#GATE_SSH_SOCK=~/.ssh/agent-gate.sock
+# The real 1Password CLI. Set an absolute path if `op` on PATH is a wrapper.
+#GATE_OP_BIN=op
+# Default unlock length when no argument or GATE_<GATE>_TIMEOUT is given.
+#GATE_DEFAULT_TIMEOUT=30m
+# Your name, shown to the agent in LOCKED messages ("Ask Alice to run: unlock ssh").
+#GATE_OWNER="the owner"
+# tmpfs root for unlocked tokens. Must be memory-backed and per-user.
+#GATE_RT_BASE="$XDG_RUNTIME_DIR"
+# Where your own gate files live (one file per gate, see examples/gates.d/).
+#GATE_DIR="$GATE_CONF/gates.d"

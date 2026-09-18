@@ -262,8 +262,26 @@ test_dispatcher_lock_all_and_enroll() {
     teardown
 }
 
+test_install_seeds_and_never_overwrites() {
+    setup
+    mkdir -p "$HOME/.local/bin"
+    printf 'GATE_OWNER=Keep\n' > "$XDG_CONFIG_HOME/agent-gate/config"
+    out="$(bash "$REPO/install.sh" 2>&1)"; rc=$?
+    assert_exit "install rc" "$rc" "0"
+    for b in unlock lock gate-ssh 1p; do
+        assert_eq "symlink $b" "$(readlink -f "$HOME/.local/bin/$b")" "$(readlink -f "$REPO/bin/$b")"
+    done
+    assert_eq "config untouched" "$(cat "$XDG_CONFIG_HOME/agent-gate/config")" "GATE_OWNER=Keep"
+    [[ -d "$XDG_CONFIG_HOME/agent-gate/1p" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL 1p dir"; }
+    rm "$XDG_CONFIG_HOME/agent-gate/config"
+    bash "$REPO/install.sh" >/dev/null 2>&1
+    assert_contains "config seeded from example" "$(cat "$XDG_CONFIG_HOME/agent-gate/config")" "GATE_SSH_KEY"
+    teardown
+}
+
 test_defaults; test_config_file_overrides; test_deprecated_env; test_timeout_parse_and_precedence; test_registry
 test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock; test_gate_ssh_locked_and_unlocked
 test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_lock_all_and_enroll
+test_install_seeds_and_never_overwrites
 report
