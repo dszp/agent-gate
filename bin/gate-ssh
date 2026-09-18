@@ -8,10 +8,13 @@ gate_conf_load; gate_load_gates
 if ! agent_status ssh; then
     echo "LOCKED — no key loaded. Ask $GATE_OWNER to run: unlock ssh [timeout]" >&2; exit 1
 fi
+key="$(agent_key ssh)"; sock="$(agent_sock ssh)"
+[[ -n "$key" && -n "$sock" ]] || { echo "agent-gate: ssh gate has no key/socket configured" >&2; exit 2; }
 target="$1"; shift
-exec env SSH_AUTH_SOCK="$(agent_sock ssh)" ssh \
-    -o IdentitiesOnly=yes -i "$(agent_key ssh)" \
-    -o IdentityAgent="$(agent_sock ssh)" \
+exec env SSH_AUTH_SOCK="$sock" ssh \
+    -F /dev/null -o BatchMode=yes \
+    -o IdentitiesOnly=yes -i "$key" \
+    -o IdentityAgent="$sock" \
     -o StrictHostKeyChecking=accept-new \
     -o ConnectTimeout=10 \
     "$target" "$@"
