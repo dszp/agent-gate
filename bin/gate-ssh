@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# gate-ssh — ssh through the gated agent only. Works only while `unlock ssh` is in effect.
+# Usage: gate-ssh [user@]host [command...]
+set -euo pipefail
+. "$(dirname "$(readlink -f "$0")")/../lib/gate-lib.sh"
+gate_conf_load; gate_load_gates
+[[ $# -ge 1 ]] || { echo "Usage: gate-ssh [user@]host [command...]" >&2; exit 1; }
+if ! agent_status ssh; then
+    echo "LOCKED — no key loaded. Ask $GATE_OWNER to run: unlock ssh [timeout]" >&2; exit 1
+fi
+target="$1"; shift
+exec env SSH_AUTH_SOCK="$(agent_sock ssh)" ssh \
+    -o IdentitiesOnly=yes -i "$(agent_key ssh)" \
+    -o IdentityAgent="$(agent_sock ssh)" \
+    -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=10 \
+    "$target" "$@"

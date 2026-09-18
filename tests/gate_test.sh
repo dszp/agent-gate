@@ -155,6 +155,56 @@ test_secret_expired_is_locked() {
     teardown
 }
 
+_agent_setup() { setup; export GATE_BUILTIN_DIR="$REPO/gates.d"; }
+
+test_agent_unlock_starts_agent_when_absent() {
+    _agent_setup
+    stub ssh-add   'case "$*" in "-l") exit 2;; *) exit 0;; esac'
+    stub ssh-agent 'echo "SSH_AGENT_PID=1; export SSH_AGENT_PID;"'
+    mkdir -p "$HOME/.ssh"; : > "$HOME/.ssh/agent-gate"
+    out="$(run_lib 'gate_load_gates; agent_unlock ssh 1h' 2>&1)"; rc=$?
+    assert_exit "agent unlock rc" "$rc" "0"
+    assert_contains "agent started" "$(stub_log)" "ssh-agent -a $HOME/.ssh/agent-gate.sock"
+    assert_contains "key added with timeout" "$(stub_log)" "ssh-add -t 1h $HOME/.ssh/agent-gate"
+    assert_contains "unlock message" "$out" "for the next 1h"
+    teardown
+}
+
+test_agent_unlock_missing_key() {
+    _agent_setup
+    stub ssh-add 'exit 0'; stub ssh-agent 'exit 0'
+    out="$(run_lib 'gate_load_gates; agent_unlock ssh 1h' 2>&1)"; rc=$?
+    assert_exit "missing key rc" "$rc" "1"
+    assert_contains "missing key msg" "$out" "key not found"
+    teardown
+}
+
+test_agent_status_and_lock() {
+    _agent_setup
+    stub ssh-add 'case "$*" in "-l") exit 1;; *) exit 0;; esac'
+    run_lib 'gate_load_gates; agent_status ssh'; assert_exit "status empty agent" "$?" "1"
+    mkdir -p "$HOME/.ssh"; python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$HOME/.ssh/agent-gate.sock"
+    out="$(run_lib 'gate_load_gates; agent_lock ssh')"
+    assert_contains "lock drops keys" "$(stub_log)" "ssh-add -D"
+    assert_contains "lock msg" "$out" "Locked"
+    teardown
+}
+
+test_gate_ssh_locked_and_unlocked() {
+    _agent_setup
+    stub ssh-add 'exit 2'; stub ssh 'exit 0'
+    printf 'GATE_OWNER=Alice\n' > "$XDG_CONFIG_HOME/agent-gate/config"
+    out="$(bash "$REPO/bin/gate-ssh" root@host uptime 2>&1)"; rc=$?
+    assert_exit "gate-ssh locked rc" "$rc" "1"
+    assert_eq "gate-ssh locked msg" "$out" "LOCKED — no key loaded. Ask Alice to run: unlock ssh [timeout]"
+    stub ssh-add 'exit 0'
+    bash "$REPO/bin/gate-ssh" root@host uptime >/dev/null 2>&1; assert_exit "gate-ssh unlocked rc" "$?" "0"
+    assert_contains "ssh opts" "$(stub_log)" "ssh -o IdentitiesOnly=yes -i $HOME/.ssh/agent-gate -o IdentityAgent=$HOME/.ssh/agent-gate.sock -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 root@host uptime"
+    bash "$REPO/bin/gate-ssh" >/dev/null 2>&1; assert_exit "gate-ssh no args rc" "$?" "1"
+    teardown
+}
+
 test_defaults; test_config_file_overrides; test_deprecated_env; test_timeout_parse_and_precedence; test_registry
 test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
+test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock; test_gate_ssh_locked_and_unlocked
 report

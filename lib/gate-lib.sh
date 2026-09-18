@@ -185,3 +185,36 @@ secret_lock() { # <name>
     systemctl --user reset-failed "agent-gate-lock-$1.service" >/dev/null 2>&1
     echo "Locked $1."
 }
+
+# ---- kind: agent --------------------------------------------------------------
+agent_key()  { printf '%s' "$(gate_opt "$1" key  "$GATE_SSH_KEY")"; }
+agent_sock() { printf '%s' "$(gate_opt "$1" sock "$GATE_SSH_SOCK")"; }
+
+agent_status() { # <name> -> rc 0 key loaded | 1 agent empty | 2 no agent  (ssh-add -l semantics)
+    SSH_AUTH_SOCK="$(agent_sock "$1")" ssh-add -l >/dev/null 2>&1
+}
+
+agent_unlock() { # <name> <timeout-spec>  — PROMPTS via ssh-add
+    local name="$1" spec="$2" key sock rc
+    key="$(agent_key "$name")"; sock="$(agent_sock "$name")"
+    [[ -f "$key" ]] || { echo "ERROR: key not found at $key (set GATE_SSH_KEY or key= on the gate)" >&2; return 1; }
+    agent_status "$name"; rc=$?
+    if [[ $rc -eq 2 ]]; then
+        rm -f "$sock"; mkdir -p "$(dirname "$sock")"
+        ssh-agent -a "$sock" >/dev/null || { echo "ERROR: couldn't start ssh-agent at $sock" >&2; return 1; }
+        echo "Started dedicated ssh-agent at $sock"
+    fi
+    echo "Loading key (auto-expires in $spec). Enter your passphrase:"
+    SSH_AUTH_SOCK="$sock" ssh-add -t "$spec" "$key" || return 1
+    echo "Authorized — the agent can use the key for the next $spec.  Lock early with: lock $name"
+}
+
+agent_lock() { # <name>
+    local sock; sock="$(agent_sock "$1")"
+    if [[ -S "$sock" ]]; then
+        SSH_AUTH_SOCK="$sock" ssh-add -D >/dev/null 2>&1 || true
+        echo "Locked $1 — key removed from the agent."
+    else
+        echo "Already locked — no dedicated agent for $1."
+    fi
+}
