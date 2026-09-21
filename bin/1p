@@ -140,11 +140,14 @@ unlock_one() { # <profile> <pass> <secs> <label>  -> rc≠0 on failure
         || ! printf 'vaults=%s\n' "$vaults"  > "$rt/meta" \
         || ! echo $(( $(date +%s) + secs ))  > "$rt/expiry"; then
         unset token
+        # a token with no expiry beside it is plaintext nothing will ever scrub
+        cmd_lock "$p" >/dev/null 2>&1
         echo "1p: cannot write $rt" >&2
         return 1
     fi
     chmod 600 "$rt/token" "$rt/meta" "$rt/expiry"
     unset token
+    gate_warn_not_memory "$rt"
     systemctl --user stop "agent-gate-1p-lock-$p.timer"          >/dev/null 2>&1 || true
     systemctl --user reset-failed "agent-gate-1p-lock-$p.service" >/dev/null 2>&1 || true
     systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-1p-lock-$p" \

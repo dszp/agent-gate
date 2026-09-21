@@ -160,6 +160,17 @@ test_secret_no_ref_no_blob() {
     teardown
 }
 
+test_secret_partial_write_scrubs_token() { # token write succeeds, expiry write fails
+    _secret_setup
+    stub op 'echo "s3cret"'
+    rt="$XDG_RUNTIME_DIR/agent-gate/tok"; mkdir -p "$rt/expiry"
+    out="$(_run_secret 'secret_unlock tok 15m' 2>"$TMP/err_pw")"; rc=$?
+    assert_exit "secret partial write rc" "$rc" "1"
+    assert_contains "secret partial write stderr" "$(cat "$TMP/err_pw")" "cannot write"
+    [[ -e "$rt/token" ]] && { FAIL=$((FAIL+1)); echo "FAIL secret partial write: token left behind"; } || PASS=$((PASS+1))
+    teardown
+}
+
 test_secret_write_fails_closed() {
     _secret_setup
     stub op 'echo "s3cret"'
@@ -352,7 +363,7 @@ test_install_seeds_and_never_overwrites() {
 test_defaults; test_config_file_overrides; test_config_file_unbound_var_is_safe; test_double_source_is_safe
 test_deprecated_env; test_timeout_parse_and_precedence; test_registry
 test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
-test_secret_write_fails_closed; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
+test_secret_write_fails_closed; test_secret_partial_write_scrubs_token; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock
 test_gate_ssh_locked_and_unlocked; test_gate_ssh_missing_key_or_sock
 test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_lock_all_and_enroll

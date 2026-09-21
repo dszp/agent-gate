@@ -154,19 +154,25 @@ secret_remaining() { # <name> -> seconds left; rc=1 if locked/expired
     printf '%s' $(( e - now ))
 }
 
+gate_warn_not_memory() { # <dir> — stderr warning (never a failure) when plaintext landed on real disk
+    case "$(stat -f -c %T "$1" 2>/dev/null)" in
+        tmpfs|ramfs) ;;
+        *) echo "agent-gate: warning: $1 is not memory-backed; the token will survive a reboot" >&2 ;;
+    esac
+}
+
 _secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock timer; rc=1 on write failure (fail closed)
     local name="$1" secret="$2" secs="$3" rt tok
     rt="$(secret_rt "$name")"; tok="$rt/$(secret_tokfile "$name")"
     umask 077
     if ! mkdir -p "$rt" || ! printf '%s' "$secret" > "$tok" || ! echo $(( $(date +%s) + secs )) > "$rt/expiry"; then
+        # a token with no expiry beside it is plaintext nothing will ever scrub
+        secret_lock "$name" >/dev/null 2>&1
         echo "agent-gate: cannot write $rt (is GATE_RT_BASE writable?)" >&2
         return 1
     fi
     chmod 600 "$tok" "$rt/expiry"
-    case "$(stat -f -c %T "$rt" 2>/dev/null)" in
-        tmpfs|ramfs) ;;
-        *) echo "agent-gate: warning: $rt is not memory-backed; the token will survive a reboot" >&2 ;;
-    esac
+    gate_warn_not_memory "$rt"
     systemctl --user stop "agent-gate-lock-$name.timer"           >/dev/null 2>&1
     systemctl --user reset-failed "agent-gate-lock-$name.service" >/dev/null 2>&1
     systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-lock-$name" \

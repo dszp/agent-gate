@@ -40,7 +40,7 @@ Timeouts accept a bare number of seconds or `Ns`/`Nm`/`Nh`/`Nd`/`Nw` (`15m`, `1h
 
 The agent never runs `unlock`. It calls the gated wrappers, which work only while the owner has unlocked the matching gate:
 
-- `gate-ssh user@host 'cmd'`: SSH through the gated key. This is what serves the built-in `ssh` gate — there's no other command for it.
+- `gate-ssh user@host 'cmd'`: SSH through the gated key. This is what serves the built-in `ssh` gate — there's no other command for it. It runs `ssh -F /dev/null`, so `~/.ssh/config` is ignored: host aliases, `ProxyJump` and per-host options don't apply. Use the full hostname.
 - `1p read op://vault/item/field`: read a 1Password secret (also `inject`, `whoami`, and `item`/`document` get/list/create/edit/delete). `run`, `signin`, and the account-admin verbs stay blocked regardless of unlock state.
 
 If a gate isn't unlocked, the wrapper refuses and names who to ask:

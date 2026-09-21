@@ -116,6 +116,17 @@ test_unlock_wrong_passphrase() {
     teardown
 }
 
+test_unlock_partial_write_scrubs_token() { # token write succeeds, expiry write fails
+    setup
+    _enroll "Agent-Test" "ops_tok1" pw acme
+    rt="$XDG_RUNTIME_DIR/agent-gate/1p/acme"; mkdir -p "$rt/expiry"
+    out="$(GATE_1P_PASSPHRASE=pw run unlock acme 15m 2>"$TMP/err_pw")"; rc=$?
+    assert_exit "unlock partial write exit" "$rc" "1"
+    assert_contains "unlock partial write stderr" "$(cat "$TMP/err_pw")" "cannot write"
+    [[ -e "$rt/token" ]] && { FAIL=$((FAIL+1)); echo "FAIL unlock partial write: token left behind"; } || PASS=$((PASS+1))
+    teardown
+}
+
 test_unlock_write_fails_closed() {
     setup
     _enroll "Agent-Test" "ops_tok1" pw acme
@@ -376,7 +387,7 @@ test_unlock_all_by_default() {
 
 test_help; test_status_empty; test_parse_timeout_default
 test_enroll_writes_encrypted; test_enroll_rejects_bad_token
-test_unlock_writes_tmpfs; test_unlock_wrong_passphrase; test_unlock_write_fails_closed; test_unlock_rejects_unknown_arg
+test_unlock_writes_tmpfs; test_unlock_wrong_passphrase; test_unlock_write_fails_closed; test_unlock_partial_write_scrubs_token; test_unlock_rejects_unknown_arg
 test_unlock_single_default_profile
 test_status_unlocked; test_lock_scrubs; test_lock_all
 test_read_locked; test_read_injects_token; test_blocked_verb; test_item_get_allowed
