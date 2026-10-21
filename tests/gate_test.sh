@@ -160,6 +160,24 @@ test_secret_no_ref_no_blob() {
     teardown
 }
 
+test_secret_ref_hang_times_out_to_blob() { # an unanswered approval prompt must not block the fallback
+    _secret_setup
+    stub op 'sleep 30'
+    printf 'blobsecret\n' | GATE_1P_PASSPHRASE=pw _run_secret 'secret_enroll tok' >/dev/null 2>&1
+    start=$(date +%s)
+    out="$(GATE_OP_READ_TIMEOUT=1 GATE_1P_PASSPHRASE=pw _run_secret 'secret_unlock tok 10m' 2>&1)"; rc=$?
+    took=$(( $(date +%s) - start ))
+    assert_exit "hung ref rc" "$rc" "0"
+    [[ $took -lt 10 ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL hung ref bounded: took ${took}s"; }
+    assert_contains "timeout notice" "$out" "no answer from 1Password for tok in 1s"
+    assert_contains "fallback notice" "$out" "falling back to the passphrase"
+    assert_eq "token from blob" "$(cat "$XDG_RUNTIME_DIR/agent-gate/tok/token")" "blobsecret"
+    out="$(GATE_OP_READ_TIMEOUT=soon _run_secret 'secret_unlock tok 10m' 2>&1)"; rc=$?
+    assert_exit "bad read timeout rc" "$rc" "2"
+    assert_contains "bad read timeout msg" "$out" "bad timeout 'soon'"
+    teardown
+}
+
 test_secret_partial_write_scrubs_token() { # token write succeeds, expiry write fails
     _secret_setup
     stub op 'echo "s3cret"'
@@ -362,7 +380,7 @@ test_install_seeds_and_never_overwrites() {
 
 test_defaults; test_config_file_overrides; test_config_file_unbound_var_is_safe; test_double_source_is_safe
 test_deprecated_env; test_timeout_parse_and_precedence; test_registry
-test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
+test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_ref_hang_times_out_to_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
 test_secret_write_fails_closed; test_secret_partial_write_scrubs_token; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock
 test_gate_ssh_locked_and_unlocked; test_gate_ssh_missing_key_or_sock

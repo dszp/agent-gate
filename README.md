@@ -6,7 +6,7 @@ agent-gate is a set of shell commands that let an AI agent use SSH keys, 1Passwo
 
 ## Requirements
 
-Bash ≥ 4.4, GNU coreutils (`readlink -f`, `stat`, `shred`), `openssl`, and `ssh`. A systemd user session is optional but recommended — without it, autolock timers can't be scheduled and you should run `lock` by hand (see [`docs/security-model.md`](docs/security-model.md)). Running the tests additionally needs `python3`.
+Bash ≥ 4.4, GNU coreutils (`readlink -f`, `stat`, `shred`, `timeout`), `openssl`, and `ssh`. A systemd user session is optional but recommended — without it, autolock timers can't be scheduled and you should run `lock` by hand (see [`docs/security-model.md`](docs/security-model.md)). Running the tests additionally needs `python3`.
 
 ## Install
 

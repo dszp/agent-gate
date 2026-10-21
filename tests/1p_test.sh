@@ -11,7 +11,7 @@ setup() {
     export XDG_CONFIG_HOME="$HOME/.config"
     mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMP/bin"
     # Unset every knob a developer's shell might carry in (mirrors harness.sh).
-    unset GATE_SSH_KEY GATE_SSH_SOCK GATE_OP_BIN GATE_DEFAULT_TIMEOUT GATE_OWNER \
+    unset GATE_SSH_KEY GATE_SSH_SOCK GATE_OP_BIN GATE_DEFAULT_TIMEOUT GATE_OP_READ_TIMEOUT GATE_OWNER \
           GATE_RT_BASE GATE_DIR GATE_1P_RT GATE_PASSPHRASE GATE_1P_PASSPHRASE OP_BIN \
           CLAUDE_UNLOCK_TIMEOUT CLAUDE_1P_TIMEOUT CLAUDE_1P_PASSPHRASE 2>/dev/null
     # stub op: log argv + token, answer whoami/read from env/log

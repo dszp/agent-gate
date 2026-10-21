@@ -9,6 +9,9 @@
 #GATE_OP_BIN=op
 # Default unlock length when no argument or GATE_<GATE>_TIMEOUT is given.
 #GATE_DEFAULT_TIMEOUT=30m
+# How long to wait on `op read` before falling back to the passphrase prompt.
+# Raise it if GATE_OP_BIN asks for approval (TouchID) and you need more time.
+#GATE_OP_READ_TIMEOUT=45s
 # Your name, shown to the agent in LOCKED messages ("Ask Alice to run: unlock ssh").
 #GATE_OWNER="the owner"
 # tmpfs root for unlocked tokens. Must be memory-backed and per-user.

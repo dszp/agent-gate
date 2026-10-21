@@ -53,12 +53,13 @@ gate_conf_load() {
     : "${GATE_SSH_SOCK:=$HOME/.ssh/agent-gate.sock}"
     : "${GATE_OP_BIN:=op}"
     : "${GATE_DEFAULT_TIMEOUT:=30m}"
+    : "${GATE_OP_READ_TIMEOUT:=45s}"
     : "${GATE_OWNER:=the owner}"
     : "${GATE_RT_BASE:=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}}"
     : "${GATE_DIR:=$GATE_CONF/gates.d}"
     : "${GATE_1P_RT:=$GATE_RT_BASE/agent-gate/1p}"
     export GATE_CONF GATE_SSH_KEY GATE_SSH_SOCK GATE_OP_BIN GATE_DEFAULT_TIMEOUT \
-           GATE_OWNER GATE_RT_BASE GATE_DIR GATE_1P_RT
+           GATE_OP_READ_TIMEOUT GATE_OWNER GATE_RT_BASE GATE_DIR GATE_1P_RT
     # GATE_PASSPHRASE and its alias GATE_1P_PASSPHRASE must agree: whichever the
     # caller set, mirror it onto the other so bin/1p and this lib see the same value.
     if [[ -n "${GATE_PASSPHRASE:-}" || -n "${GATE_1P_PASSPHRASE:-}" ]]; then
@@ -180,9 +181,20 @@ _secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock t
         || echo "(note: auto-lock timer for $name couldn't be scheduled; expiry is still enforced on use)" >&2
 }
 
-_secret_from_ref() { # <name> -> secret on stdout; rc=1 if no ref or unresolvable
-    local ref val; ref="$(gate_opt "$1" ref)"; [[ -n "$ref" ]] || return 1
-    val="$("$GATE_OP_BIN" read "$ref" 2>/dev/null)" || return 1
+# Bounded by GATE_OP_READ_TIMEOUT: a GATE_OP_BIN that asks for approval (a TouchID
+# proxy, a desktop-app prompt) blocks until someone answers, and an unanswered
+# prompt neither succeeds nor fails — so without a bound the blob fallback in
+# secret_unlock could never fire. The 45s default leaves room to approve. `timeout`
+# signals its whole process group, so a child holding the pipe dies too and the
+# command substitution can't hang on an inherited stdout.
+_secret_from_ref() { # <name> <read-secs> -> secret on stdout; rc=1 if no ref or unresolvable
+    local ref val rc; ref="$(gate_opt "$1" ref)"; [[ -n "$ref" ]] || return 1
+    val="$(timeout -k 5 "$2" "$GATE_OP_BIN" read "$ref" 2>/dev/null)"; rc=$?
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "agent-gate: no answer from 1Password for $1 in ${2}s (unapproved prompt?)." >&2
+        return 1
+    fi
+    [[ $rc -eq 0 ]] || return 1
     [[ -n "$val" ]] || return 1
     printf '%s' "$val"
 }
@@ -198,9 +210,10 @@ _secret_from_blob() { # <name> -> secret on stdout; PROMPTS. rc=1 wrong pass / n
 }
 
 secret_unlock() { # <name> <timeout-spec>  rc: 0 ok | 1 failed | 2 bad timeout
-    local name="$1" spec="$2" secs secret
+    local name="$1" spec="$2" secs read_secs secret
     secs="$(gate_parse_timeout "$spec")" || return 2
-    if secret="$(_secret_from_ref "$name")"; then
+    read_secs="$(gate_parse_timeout "$GATE_OP_READ_TIMEOUT")" || return 2
+    if secret="$(_secret_from_ref "$name" "$read_secs")"; then
         _secret_write "$name" "$secret" "$secs" || return 1
         echo "Unlocked $name for $spec (from 1Password). Lock early: lock $name"; return 0
     fi
