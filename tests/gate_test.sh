@@ -199,6 +199,18 @@ test_secret_write_fails_closed() {
     teardown
 }
 
+test_secret_per_gate_op_bin() { # op= overrides GATE_OP_BIN for this gate's ref read only
+    _secret_setup
+    echo 'gate_register tok secret ref=op://V/item/field op=op-resolver' > "$XDG_CONFIG_HOME/agent-gate/gates.d/tok.sh"
+    stub op 'exit 1'
+    stub op-resolver 'echo "viaresolver"'
+    out="$(_run_secret 'secret_unlock tok 5m' 2>&1)"; rc=$?
+    assert_exit "per-gate op rc" "$rc" "0"
+    assert_eq "per-gate op token" "$(cat "$XDG_RUNTIME_DIR/agent-gate/tok/token")" "viaresolver"
+    assert_contains "per-gate op called" "$(stub_log)" "op-resolver read op://V/item/field"
+    teardown
+}
+
 test_secret_custom_rt_and_lock() {
     _secret_setup
     echo 'gate_register tok secret ref=op://V/i/f rt=$GATE_RT_BASE/legacy-dir tokfile=vaultpw' > "$XDG_CONFIG_HOME/agent-gate/gates.d/tok.sh"
@@ -380,7 +392,7 @@ test_install_seeds_and_never_overwrites() {
 
 test_defaults; test_config_file_overrides; test_config_file_unbound_var_is_safe; test_double_source_is_safe
 test_deprecated_env; test_timeout_parse_and_precedence; test_registry
-test_secret_unlock_from_ref; test_secret_ref_fails_then_blob; test_secret_ref_hang_times_out_to_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
+test_secret_unlock_from_ref; test_secret_per_gate_op_bin; test_secret_ref_fails_then_blob; test_secret_ref_hang_times_out_to_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
 test_secret_write_fails_closed; test_secret_partial_write_scrubs_token; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock
 test_gate_ssh_locked_and_unlocked; test_gate_ssh_missing_key_or_sock

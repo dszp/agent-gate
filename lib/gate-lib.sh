@@ -187,9 +187,14 @@ _secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock t
 # secret_unlock could never fire. The 45s default leaves room to approve. `timeout`
 # signals its whole process group, so a child holding the pipe dies too and the
 # command substitution can't hang on an inherited stdout.
+# op= on the gate overrides GATE_OP_BIN for this read only. bin/1p needs the genuine
+# CLI (it supplies the service-account token itself), while a ref read needs a binary
+# that authenticates on its own (e.g. a proxy that picks the right account), so one
+# global can't serve both on a box that has such a proxy.
 _secret_from_ref() { # <name> <read-secs> -> secret on stdout; rc=1 if no ref or unresolvable
-    local ref val rc; ref="$(gate_opt "$1" ref)"; [[ -n "$ref" ]] || return 1
-    val="$(timeout -k 5 "$2" "$GATE_OP_BIN" read "$ref" 2>/dev/null)"; rc=$?
+    local ref op val rc; ref="$(gate_opt "$1" ref)"; [[ -n "$ref" ]] || return 1
+    op="$(gate_opt "$1" op "$GATE_OP_BIN")"
+    val="$(timeout -k 5 "$2" "$op" read "$ref" 2>/dev/null)"; rc=$?
     if [[ $rc -eq 124 || $rc -eq 137 ]]; then
         echo "agent-gate: no answer from 1Password for $1 in ${2}s (unapproved prompt?)." >&2
         return 1

@@ -6,6 +6,7 @@
 # The dedicated ssh-agent socket. Only gate-ssh uses it.
 #GATE_SSH_SOCK=~/.ssh/agent-gate.sock
 # The real 1Password CLI. Set an absolute path if `op` on PATH is a wrapper.
+# A secret gate can read its ref through a different binary with op= on the gate.
 #GATE_OP_BIN=op
 # Default unlock length when no argument or GATE_<GATE>_TIMEOUT is given.
 #GATE_DEFAULT_TIMEOUT=30m
