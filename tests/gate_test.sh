@@ -63,7 +63,10 @@ test_deprecated_env() {
 
 test_timeout_parse_and_precedence() {
     setup
-    assert_eq "bare secs" "$(run_lib 'gate_parse_timeout 900')" "900"
+    assert_eq "bare number = hours" "$(run_lib 'gate_parse_timeout 5')" "18000"
+    assert_eq "explicit secs" "$(run_lib 'gate_parse_timeout 900s')" "900"
+    assert_eq "label bare -> h" "$(run_lib 'gate_spec_label 5')" "5h"
+    assert_eq "label keeps unit" "$(run_lib 'gate_spec_label 15m')" "15m"
     assert_eq "minutes"   "$(run_lib 'gate_parse_timeout 15m')" "900"
     assert_eq "hours"     "$(run_lib 'gate_parse_timeout 1h')"  "3600"
     assert_eq "days"      "$(run_lib 'gate_parse_timeout 2d')"  "172800"
@@ -165,7 +168,7 @@ test_secret_ref_hang_times_out_to_blob() { # an unanswered approval prompt must 
     stub op 'sleep 30'
     printf 'blobsecret\n' | GATE_1P_PASSPHRASE=pw _run_secret 'secret_enroll tok' >/dev/null 2>&1
     start=$(date +%s)
-    out="$(GATE_OP_READ_TIMEOUT=1 GATE_1P_PASSPHRASE=pw _run_secret 'secret_unlock tok 10m' 2>&1)"; rc=$?
+    out="$(GATE_OP_READ_TIMEOUT=1s GATE_1P_PASSPHRASE=pw _run_secret 'secret_unlock tok 10m' 2>&1)"; rc=$?
     took=$(( $(date +%s) - start ))
     assert_exit "hung ref rc" "$rc" "0"
     [[ $took -lt 10 ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL hung ref bounded: took ${took}s"; }
@@ -196,6 +199,17 @@ test_secret_write_fails_closed() {
     assert_exit "secret write fails-closed rc" "$rc" "1"
     if [[ "$out" == *"Unlocked"* ]]; then FAIL=$((FAIL+1)); echo "FAIL secret write fails-closed: stdout has Unlocked: [$out]"; else PASS=$((PASS+1)); fi
     assert_contains "secret write fails-closed stderr" "$(cat "$TMP/err_wf")" "cannot write"
+    teardown
+}
+
+test_secret_bare_number_is_hours() {
+    _secret_setup
+    stub op 'echo "s3cret"'
+    out="$(_run_secret 'secret_unlock tok 2' 2>&1)"; rc=$?
+    assert_exit "bare unlock rc" "$rc" "0"
+    assert_contains "message says hours" "$out" "Unlocked tok for 2h"
+    assert_contains "timer is 2h" "$(stub_log)" "--on-active=7200"
+    assert_contains "timer description carries duration" "$(stub_log)" "--description=agent-gate: lock tok after 2h"
     teardown
 }
 
@@ -241,7 +255,7 @@ test_agent_unlock_starts_agent_when_absent() {
     out="$(run_lib 'gate_load_gates; agent_unlock ssh 1h' 2>&1)"; rc=$?
     assert_exit "agent unlock rc" "$rc" "0"
     assert_contains "agent started" "$(stub_log)" "ssh-agent -a $HOME/.ssh/agent-gate.sock"
-    assert_contains "key added with timeout" "$(stub_log)" "ssh-add -t 1h $HOME/.ssh/agent-gate"
+    assert_contains "key added with timeout" "$(stub_log)" "ssh-add -t 3600 $HOME/.ssh/agent-gate"
     assert_contains "unlock message" "$out" "for the next 1h"
     teardown
 }
@@ -352,10 +366,37 @@ OPSTUB
     log="$(stub_log)"
     op_line=$(grep -n '^op read' <<<"$log" | head -1 | cut -d: -f1)
     add_line=$(grep -n '^ssh-add -t' <<<"$log" | head -1 | cut -d: -f1)
-    [[ -n "$op_line" && -n "$add_line" && "$op_line" -lt "$add_line" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL all order: secret($op_line) before agent($add_line)"; }
+    # Passphrase prompts back to back: agent (ssh) right after sa (1p), secret gates last.
+    [[ -n "$op_line" && -n "$add_line" && "$add_line" -lt "$op_line" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL all order: agent($add_line) before secret($op_line)"; }
     assert_contains "sa (1p) unlocked before secret gate's op read" "$log" "op read op://V/i/f 1p_token_present=1"
     assert_eq "1p unlocked first" "$(cat "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token")" "ops_tok"
-    assert_contains "timeout passed to ssh-add" "$log" "ssh-add -t 20m"
+    assert_contains "timeout passed to ssh-add in seconds" "$log" "ssh-add -t 1200"
+    teardown
+}
+
+test_dispatcher_unlock_all_subset() { # GATE_UNLOCK_ALL filters `unlock all`; bare lock still locks every gate
+    _disp_setup
+    echo 'gate_register tok2 secret ref=op://V/i/g' > "$XDG_CONFIG_HOME/agent-gate/gates.d/tok2.sh"
+    printf 'GATE_UNLOCK_ALL="tok2 1p"\n' > "$XDG_CONFIG_HOME/agent-gate/config"
+    out="$(unlock all 5m 2>&1)"; rc=$?
+    assert_exit "subset rc" "$rc" "0"
+    log="$(stub_log)"
+    assert_contains "listed secret unlocked" "$log" "op read op://V/i/g"
+    assert_not_contains "unlisted secret skipped" "$log" "op read op://V/i/f"
+    assert_not_contains "unlisted agent skipped" "$log" "ssh-add -t"
+    assert_not_contains "no section for skipped gate" "$out" "== tok =="
+    lock >/dev/null 2>&1
+    assert_contains "bare lock still locks unlisted gates" "$(stub_log)" "agent-gate-lock-tok.timer"
+    teardown
+}
+
+test_dispatcher_unlock_all_unknown_name() { # a typo must fail before anything unlocks
+    _disp_setup
+    printf 'GATE_UNLOCK_ALL="tok vutlr"\n' > "$XDG_CONFIG_HOME/agent-gate/config"
+    out="$(unlock all 5m 2>&1)"; rc=$?
+    assert_exit "unknown name rc" "$rc" "2"
+    assert_contains "names the bad entry" "$out" "vutlr"
+    assert_not_contains "nothing unlocked" "$(stub_log)" "op read"
     teardown
 }
 
@@ -392,10 +433,10 @@ test_install_seeds_and_never_overwrites() {
 
 test_defaults; test_config_file_overrides; test_config_file_unbound_var_is_safe; test_double_source_is_safe
 test_deprecated_env; test_timeout_parse_and_precedence; test_registry
-test_secret_unlock_from_ref; test_secret_per_gate_op_bin; test_secret_ref_fails_then_blob; test_secret_ref_hang_times_out_to_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
+test_secret_unlock_from_ref; test_secret_per_gate_op_bin; test_secret_bare_number_is_hours; test_secret_ref_fails_then_blob; test_secret_ref_hang_times_out_to_blob; test_secret_wrong_passphrase; test_secret_no_ref_no_blob
 test_secret_write_fails_closed; test_secret_partial_write_scrubs_token; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock
 test_gate_ssh_locked_and_unlocked; test_gate_ssh_missing_key_or_sock
-test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_lock_all_and_enroll
+test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_unlock_all_subset; test_dispatcher_unlock_all_unknown_name; test_dispatcher_lock_all_and_enroll
 test_install_seeds_and_never_overwrites
 report

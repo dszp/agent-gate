@@ -151,6 +151,7 @@ unlock_one() { # <profile> <pass> <secs> <label>  -> rc≠0 on failure
     systemctl --user stop "agent-gate-1p-lock-$p.timer"          >/dev/null 2>&1 || true
     systemctl --user reset-failed "agent-gate-1p-lock-$p.service" >/dev/null 2>&1 || true
     systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-1p-lock-$p" \
+        --description="agent-gate: 1p lock $p after $tlabel" \
         "$SELF" lock "$p" >/dev/null 2>&1 \
         || echo "(note: auto-lock timer for $p not scheduled; expiry still enforced on use)"
     echo "Unlocked $p ($vaults) for $tlabel. Lock early: 1p lock $p"
@@ -202,7 +203,7 @@ cmd_unlock() {
     local pass; pass="$(get_pass)"
     umask 077
     local p failed=0
-    for p in "${targets[@]}"; do unlock_one "$p" "$pass" "$secs" "$timeout" || failed=1; done
+    for p in "${targets[@]}"; do unlock_one "$p" "$pass" "$secs" "$(gate_spec_label "$timeout")" || failed=1; done
     unset pass
     [[ "$failed" -eq 0 ]] || exit 1
 }

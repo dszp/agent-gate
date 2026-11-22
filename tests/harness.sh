@@ -31,6 +31,7 @@ run_lib() { # <snippet> — run with the lib sourced and config loaded, fresh ba
 
 assert_eq()       { if [[ "$2" == "$3" ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL $1: expected [$3] got [$2]"; fi; }
 assert_contains() { if [[ "$2" == *"$3"* ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL $1: [$2] missing [$3]"; fi; }
+assert_not_contains() { if [[ "$2" != *"$3"* ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL $1: [$2] contains [$3]"; fi; }
 assert_exit()     { if [[ "$2" == "$3" ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL $1: exit expected $3 got $2"; fi; }
 assert_file_absent() { if [[ ! -e "$2" ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL $1: $2 exists"; fi; }
 

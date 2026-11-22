@@ -30,11 +30,11 @@ The owner runs these. They all prompt for a passphrase except where noted.
 |---|---|
 | `unlock ssh 1h` | Loads the SSH key into a dedicated agent for 1 hour. |
 | `unlock 1p` | Unlocks every enrolled 1Password profile with one passphrase. |
-| `unlock all` | Unlocks every gate in the safest order (1Password-backed gates first, then the SSH key): one prompt for `1p`, one for `ssh`, plus one more for each `secret` gate that has to fall back to its enrolled blob because 1Password couldn't be reached. |
+| `unlock all` | Unlocks `1p`, then `ssh`, then the `secret` gates, so the two passphrase prompts come one after the other. A `secret` gate prompts only if 1Password can't be reached and it falls back to its enrolled blob. Set `GATE_UNLOCK_ALL` in the config to cover only some gates. |
 | `unlock status` | Shows every registered gate, locked or unlocked, and time remaining. |
 | `lock` | Locks every gate immediately. Run `lock <gate>` to lock just one. |
 
-Timeouts accept a bare number of seconds or `Ns`/`Nm`/`Nh`/`Nd`/`Nw` (`15m`, `1h`, `2d`). Leave it off to use `GATE_DEFAULT_TIMEOUT` from the config.
+Timeouts accept a bare number of hours (`5` is 5 hours) or `Ns`/`Nm`/`Nh`/`Nd`/`Nw` (`900s`, `15m`, `2d`). Leave it off to use `GATE_DEFAULT_TIMEOUT` from the config.
 
 ## For the agent
 

@@ -8,11 +8,15 @@
 # The real 1Password CLI. Set an absolute path if `op` on PATH is a wrapper.
 # A secret gate can read its ref through a different binary with op= on the gate.
 #GATE_OP_BIN=op
+# Timeouts: a bare number is hours (5 = 5h); use s/m/h/d/w for other units (900s, 15m).
 # Default unlock length when no argument or GATE_<GATE>_TIMEOUT is given.
 #GATE_DEFAULT_TIMEOUT=30m
 # How long to wait on `op read` before falling back to the passphrase prompt.
 # Raise it if GATE_OP_BIN asks for approval (TouchID) and you need more time.
 #GATE_OP_READ_TIMEOUT=45s
+# Gates that `unlock all` covers, space-separated. Unset = every gate. The order is
+# always 1p, ssh, then secret gates. Bare `lock` still locks every gate.
+#GATE_UNLOCK_ALL="1p ssh ansible"
 # Your name, shown to the agent in LOCKED messages ("Ask Alice to run: unlock ssh").
 #GATE_OWNER="the owner"
 # tmpfs root for unlocked tokens. Must be memory-backed and per-user.

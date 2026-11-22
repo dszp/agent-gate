@@ -98,20 +98,29 @@ gate_load_gates() { # source built-ins, then private drop-ins (each dir sorted)
 }
 
 # ---- timeouts -----------------------------------------------------------------
-gate_parse_timeout() { # <spec> -> seconds; rc=2 on malformed. Mirrors `ssh-add -t`.
+# A bare number means HOURS (`unlock ssh 5` = 5h), not seconds as in `ssh-add -t`:
+# hours are what an owner types at a prompt. Seconds need an explicit `s`. Callers
+# hand seconds onward (ssh-add, systemd-run), never the raw spec, so the two meanings
+# can't diverge between gates.
+gate_parse_timeout() { # <spec> -> seconds; rc=2 on malformed
     local t="$1" n unit secs
     if [[ "$t" =~ ^([0-9]+)([smhdw]?)$ ]]; then n="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
-    else echo "agent-gate: bad timeout '$t' (use 900, 15m, 1h, 2d)" >&2; return 2; fi
+    else echo "agent-gate: bad timeout '$t' (use 5 = 5h, 15m, 900s, 2d)" >&2; return 2; fi
     # 10#$n: force base-10 so a leading zero (008m) isn't parsed as invalid octal.
     case "$unit" in
         w) secs=$((10#$n*604800));;
         d) secs=$((10#$n*86400));;
         h) secs=$((10#$n*3600));;
         m) secs=$((10#$n*60));;
-        *) secs=$((10#$n));;
+        s) secs=$((10#$n));;
+        *) secs=$((10#$n*3600));;
     esac
     [[ "$secs" -gt 0 ]] || { echo "agent-gate: timeout must be > 0 (got '$t')" >&2; return 2; }
     printf '%s' "$secs"
+}
+
+gate_spec_label() { # <spec> -> the spec with its unit spelled out (5 -> 5h) for messages
+    [[ "$1" =~ ^[0-9]+$ ]] && printf '%sh' "$1" || printf '%s' "$1"
 }
 
 gate_timeout_for() { # <name> [explicit] -> effective spec. arg > GATE_<NAME>_TIMEOUT > default
@@ -177,6 +186,7 @@ _secret_write() { # <name> <secret> <secs> — tmpfs write + expiry + autolock t
     systemctl --user stop "agent-gate-lock-$name.timer"           >/dev/null 2>&1
     systemctl --user reset-failed "agent-gate-lock-$name.service" >/dev/null 2>&1
     systemd-run --user --quiet --on-active="$secs" --unit="agent-gate-lock-$name" \
+        --description="agent-gate: lock $name after $(gate_spec_label "$spec")" \
         "$GATE_ROOT/bin/lock" "$name" >/dev/null 2>&1 \
         || echo "(note: auto-lock timer for $name couldn't be scheduled; expiry is still enforced on use)" >&2
 }
@@ -220,12 +230,12 @@ secret_unlock() { # <name> <timeout-spec>  rc: 0 ok | 1 failed | 2 bad timeout
     read_secs="$(gate_parse_timeout "$GATE_OP_READ_TIMEOUT")" || return 2
     if secret="$(_secret_from_ref "$name" "$read_secs")"; then
         _secret_write "$name" "$secret" "$secs" || return 1
-        echo "Unlocked $name for $spec (from 1Password). Lock early: lock $name"; return 0
+        echo "Unlocked $name for $(gate_spec_label "$spec") (from 1Password). Lock early: lock $name"; return 0
     fi
     [[ -n "$(gate_opt "$name" ref)" ]] && echo "Couldn't reach 1Password for $name — falling back to the passphrase prompt." >&2
     secret="$(_secret_from_blob "$name")" || return 1
     _secret_write "$name" "$secret" "$secs" || return 1
-    echo "Unlocked $name for $spec (from the enrolled blob). Lock early: lock $name"
+    echo "Unlocked $name for $(gate_spec_label "$spec") (from the enrolled blob). Lock early: lock $name"
 }
 
 secret_enroll() { # <name> — secret on stdin (one line) or prompted; passphrase via gate_read_pass
@@ -259,7 +269,8 @@ agent_status() { # <name> -> rc 0 key loaded | 1 agent empty | 2 no agent  (ssh-
 }
 
 agent_unlock() { # <name> <timeout-spec>  — PROMPTS via ssh-add
-    local name="$1" spec="$2" key sock rc
+    local name="$1" spec="$2" key sock rc secs label
+    secs="$(gate_parse_timeout "$spec")" || return 2; label="$(gate_spec_label "$spec")"
     key="$(agent_key "$name")"; sock="$(agent_sock "$name")"
     [[ -f "$key" ]] || { echo "ERROR: key not found at $key (set GATE_SSH_KEY or key= on the gate)" >&2; return 1; }
     agent_status "$name"; rc=$?
@@ -268,9 +279,9 @@ agent_unlock() { # <name> <timeout-spec>  — PROMPTS via ssh-add
         ssh-agent -a "$sock" >/dev/null || { echo "ERROR: couldn't start ssh-agent at $sock" >&2; return 1; }
         echo "Started dedicated ssh-agent at $sock"
     fi
-    echo "Loading key (auto-expires in $spec). Enter your passphrase:"
-    SSH_AUTH_SOCK="$sock" ssh-add -t "$spec" "$key" || return 1
-    echo "Authorized — the agent can use the key for the next $spec.  Lock early with: lock $name"
+    echo "Loading key (auto-expires in $label). Enter your passphrase:"
+    SSH_AUTH_SOCK="$sock" ssh-add -t "$secs" "$key" || return 1
+    echo "Authorized — the agent can use the key for the next $label.  Lock early with: lock $name"
 }
 
 agent_lock() { # <name>

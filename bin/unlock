@@ -8,7 +8,8 @@
 #                             from 1Password or fall back to their enrolled blob
 #   unlock 1p [profile] [t]   delegates to `1p unlock`
 #   unlock <gate> enroll      (secret gates) write the encrypted blob
-#   unlock all [timeout]      1p -> secret gates -> ssh   (two prompts at most)
+#   unlock all [timeout]      1p -> ssh -> secret gates   (both prompts back to back);
+#                             GATE_UNLOCK_ALL in the config limits which gates it covers
 #   lock [gate]               bare `lock` locks everything
 # Gates are discovered from gates.d/ (built-in) and $GATE_DIR (yours).
 # ==============================================================================
@@ -25,7 +26,7 @@ Usage:
   unlock status
 
 Gates: ${GATE_NAMES[*]}  (also: all)
-Timeouts: 900 | 15m | 1h | 2d      default $GATE_DEFAULT_TIMEOUT
+Timeouts: 5 (= 5h) | 15m | 900s | 2d      default $GATE_DEFAULT_TIMEOUT
 EOF
 }
 
@@ -71,11 +72,25 @@ unlock_one() { # <gate> [args...]
     esac
 }
 
-unlock_all() { # [timeout] — sa first (one passphrase), then secret (fed by 1p), then agent last
+# Order: sa (1p passphrase), agent (ssh passphrase), then secret gates. The two
+# prompts come back to back; secret gates read through 1p, so they only need sa
+# before them, and they prompt only when 1Password is unreachable.
+# GATE_UNLOCK_ALL filters which gates are covered; it does not change the order,
+# because sa must stay ahead of the secret gates that read through it. Bare `lock`
+# ignores it and still locks every gate.
+unlock_all() { # [timeout]
     local t="${1:-}" g kind
-    for kind in sa secret agent; do
+    local -A want=()
+    if [[ -n "${GATE_UNLOCK_ALL:-}" ]]; then
+        for g in $GATE_UNLOCK_ALL; do
+            gate_known "$g" || gate_die "GATE_UNLOCK_ALL names unknown gate: $g (gates: ${GATE_NAMES[*]})"
+            want[$g]=1
+        done
+    fi
+    for kind in sa agent secret; do
         for g in "${GATE_NAMES[@]}"; do
             [[ "$(gate_kind "$g")" == "$kind" ]] || continue
+            [[ -z "${GATE_UNLOCK_ALL:-}" || -n "${want[$g]:-}" ]] || continue
             echo "== $g =="
             ( unlock_one "$g" ${t:+"$t"} ) || echo "($g not unlocked)" >&2
         done
