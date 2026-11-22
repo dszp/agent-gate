@@ -106,6 +106,17 @@ test_unlock_writes_tmpfs() {
     teardown
 }
 
+test_unlock_passphrase_from_fd() { # the dispatcher hands over a passphrase it already read
+    setup
+    _enroll "Agent-Test" "ops_tok1" pw acme
+    out="$(GATE_PASSPHRASE_FD=3 run unlock acme 15m 3<<<"pw" 2>&1 </dev/null)"; rc=$?
+    assert_exit "fd unlock exit" "$rc" "0"
+    assert_eq "fd token" "$(cat "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token")" "ops_tok1"
+    out="$(GATE_PASSPHRASE_FD=x run unlock acme 15m 2>&1 </dev/null)"; rc=$?
+    assert_exit "bad fd rejected" "$rc" "2"
+    teardown
+}
+
 test_unlock_wrong_passphrase() {
     setup
     _enroll "Agent-Test" "ops_tok1" pw acme
@@ -393,7 +404,7 @@ test_status_unlocked; test_lock_scrubs; test_lock_all
 test_read_locked; test_read_injects_token; test_blocked_verb; test_item_get_allowed
 test_routing_by_vault; test_routing_ambiguous_requires_p; test_write_verbs_allowed
 test_lock_shred_fallback; test_enroll_rejects_invalid_profile_name; test_force_profile_rejects_traversal
-test_unlock_all_by_default; test_whoami_all_when_multiple
+test_unlock_passphrase_from_fd; test_unlock_all_by_default; test_whoami_all_when_multiple
 test_internal_token_unlocked; test_internal_token_locked
 test_profiles_lists_enrolled
 test_vaults_unlocked; test_vaults_locked

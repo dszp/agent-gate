@@ -8,7 +8,7 @@
 #                             from 1Password or fall back to their enrolled blob
 #   unlock 1p [profile] [t]   delegates to `1p unlock`
 #   unlock <gate> enroll      (secret gates) write the encrypted blob
-#   unlock all [timeout]      1p -> ssh -> secret gates   (both prompts back to back);
+#   unlock all [timeout]      1p prompt, ssh prompt, then the work (prompts back to back);
 #                             GATE_UNLOCK_ALL in the config limits which gates it covers
 #   lock [gate]               bare `lock` locks everything
 # Gates are discovered from gates.d/ (built-in) and $GATE_DIR (yours).
@@ -78,8 +78,12 @@ unlock_one() { # <gate> [args...]
 # GATE_UNLOCK_ALL filters which gates are covered; it does not change the order,
 # because sa must stay ahead of the secret gates that read through it. Bare `lock`
 # ignores it and still locks every gate.
+# When both an sa and an agent gate are covered, the 1p passphrase is read here first,
+# the ssh prompt follows at once, and only then does 1p decrypt its profile blobs
+# (600k PBKDF2 rounds each, ~0.5s apiece). Otherwise the owner waited seconds between
+# the two prompts. The passphrase reaches bin/1p on fd 3, never env or argv.
 unlock_all() { # [timeout]
-    local t="${1:-}" g kind
+    local t="${1:-}" g kind pass="" pre=0
     local -A want=()
     if [[ -n "${GATE_UNLOCK_ALL:-}" ]]; then
         for g in $GATE_UNLOCK_ALL; do
@@ -87,13 +91,27 @@ unlock_all() { # [timeout]
             want[$g]=1
         done
     fi
-    for kind in sa agent secret; do
-        for g in "${GATE_NAMES[@]}"; do
+    local -a sel=()
+    for g in "${GATE_NAMES[@]}"; do
+        [[ -z "${GATE_UNLOCK_ALL:-}" || -n "${want[$g]:-}" ]] && sel+=("$g")
+    done
+    _covers() { local x; for x in "${sel[@]}"; do [[ "$(gate_kind "$x")" == "$1" ]] && return 0; done; return 1; }
+    local order="sa agent secret"
+    if _covers sa && _covers agent && [[ -z "${GATE_PASSPHRASE:-}${GATE_1P_PASSPHRASE:-}" ]]; then
+        printf '1p gate passphrase: ' >&2; IFS= read -rs pass; echo >&2
+        pre=1; order="agent sa secret"
+    fi
+    for kind in $order; do
+        for g in "${sel[@]}"; do
             [[ "$(gate_kind "$g")" == "$kind" ]] || continue
-            [[ -z "${GATE_UNLOCK_ALL:-}" || -n "${want[$g]:-}" ]] || continue
             echo "== $g =="
-            ( unlock_one "$g" ${t:+"$t"} ) || echo "($g not unlocked)" >&2
+            if [[ "$kind" == sa && $pre -eq 1 ]]; then
+                ( GATE_PASSPHRASE_FD=3 unlock_one "$g" ${t:+"$t"} 3<<<"$pass" ) || echo "($g not unlocked)" >&2
+            else
+                ( unlock_one "$g" ${t:+"$t"} ) || echo "($g not unlocked)" >&2
+            fi
         done
+        [[ "$kind" == sa ]] && pass=""
     done
     echo; cmd_status
 }

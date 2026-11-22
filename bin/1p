@@ -29,8 +29,15 @@ valid_profile() { [[ -n "$1" && "$1" != */* && "$1" != *..* ]]; } # reject empty
 
 show_help() { sed -n '3,14p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
-get_pass() { # echoes passphrase (env hook for automation/tests, else prompt)
-    if [[ -n "${GATE_PASSPHRASE:-}" ]]; then
+# GATE_PASSPHRASE_FD: `unlock all` reads the 1p passphrase itself so the ssh prompt can
+# follow it at once, then hands it over on this fd. An fd, not an env var: environ is
+# readable by any process of the same uid, a pipe already drained is not.
+get_pass() { # echoes passphrase (fd from the dispatcher, env hook for automation/tests, else prompt)
+    if [[ -n "${GATE_PASSPHRASE_FD:-}" ]]; then
+        [[ "$GATE_PASSPHRASE_FD" =~ ^[0-9]+$ ]] || { echo "1p: GATE_PASSPHRASE_FD must be a file descriptor number" >&2; return 2; }
+        local p; IFS= read -r p <&"$GATE_PASSPHRASE_FD" || [[ -n "$p" ]] || return 1
+        printf '%s' "$p"
+    elif [[ -n "${GATE_PASSPHRASE:-}" ]]; then
         printf '%s' "$GATE_PASSPHRASE"
     elif [[ -n "${GATE_1P_PASSPHRASE:-}" ]]; then
         printf '%s' "$GATE_1P_PASSPHRASE"
@@ -200,7 +207,7 @@ cmd_unlock() {
     fi
     [[ "${#targets[@]}" -gt 0 ]] || die "no profiles enrolled. Run: 1p enroll <profile>"
     local secs; secs="$(gate_parse_timeout "$timeout")" || exit 2
-    local pass; pass="$(get_pass)"
+    local pass; pass="$(get_pass)" || exit $?
     umask 077
     local p failed=0
     for p in "${targets[@]}"; do unlock_one "$p" "$pass" "$secs" "$(gate_spec_label "$timeout")" || failed=1; done

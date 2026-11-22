@@ -30,7 +30,7 @@ The owner runs these. They all prompt for a passphrase except where noted.
 |---|---|
 | `unlock ssh 1h` | Loads the SSH key into a dedicated agent for 1 hour. |
 | `unlock 1p` | Unlocks every enrolled 1Password profile with one passphrase. |
-| `unlock all` | Unlocks `1p`, then `ssh`, then the `secret` gates, so the two passphrase prompts come one after the other. A `secret` gate prompts only if 1Password can't be reached and it falls back to its enrolled blob. Set `GATE_UNLOCK_ALL` in the config to cover only some gates. |
+| `unlock all` | Asks for the `1p` passphrase, then the `ssh` passphrase, one right after the other, then unlocks `ssh`, `1p` and the `secret` gates. A `secret` gate prompts only if 1Password can't be reached and it falls back to its enrolled blob. Set `GATE_UNLOCK_ALL` in the config to cover only some gates. |
 | `unlock status` | Shows every registered gate, locked or unlocked, and time remaining. |
 | `lock` | Locks every gate immediately. Run `lock <gate>` to lock just one. |
 

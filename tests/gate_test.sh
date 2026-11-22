@@ -400,6 +400,30 @@ test_dispatcher_unlock_all_unknown_name() { # a typo must fail before anything u
     teardown
 }
 
+test_dispatcher_all_prompts_back_to_back() { # 1p passphrase read first, ssh asked before 1p decrypts
+    _disp_setup
+    mkdir -p "$HOME/.ssh"; : > "$HOME/.ssh/agent-gate"
+    printf 'Agent-Test\nops_tok\n' | GATE_1P_PASSPHRASE=pw bash "$REPO/bin/1p" enroll acme >/dev/null 2>&1
+    cat > "$TMP/bin/ssh-add" <<'ADDSTUB'
+#!/usr/bin/env bash
+present=0
+[[ -s "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token" ]] && present=1
+echo "ssh-add $* 1p_token_present=$present" >> "$XDG_RUNTIME_DIR/stub.log"
+[[ "$1" == -l ]] && exit 2
+exit 0
+ADDSTUB
+    chmod +x "$TMP/bin/ssh-add"
+    out="$(printf 'pw\n' | unlock all 20m 2>&1)"; rc=$?
+    log="$(stub_log)"
+    assert_contains "1p prompt shown" "$out" "1p gate passphrase:"
+    assert_contains "ssh-add ran before 1p decrypted" "$log" "ssh-add -t 1200 $HOME/.ssh/agent-gate 1p_token_present=0"
+    assert_eq "1p unlocked with the pre-read passphrase" "$(cat "$XDG_RUNTIME_DIR/agent-gate/1p/acme/token")" "ops_tok"
+    p1=$(grep -n '1p gate passphrase:' <<<"$out" | head -1 | cut -d: -f1)
+    p2=$(grep -c '1p gate passphrase:' <<<"$out")
+    assert_eq "1p prompted exactly once" "$p2" "1"
+    teardown
+}
+
 test_dispatcher_lock_all_and_enroll() {
     _disp_setup
     unlock tok 10m >/dev/null 2>&1
@@ -437,6 +461,6 @@ test_secret_unlock_from_ref; test_secret_per_gate_op_bin; test_secret_bare_numbe
 test_secret_write_fails_closed; test_secret_partial_write_scrubs_token; test_secret_custom_rt_and_lock; test_secret_expired_is_locked
 test_agent_unlock_starts_agent_when_absent; test_agent_unlock_missing_key; test_agent_status_and_lock
 test_gate_ssh_locked_and_unlocked; test_gate_ssh_missing_key_or_sock
-test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_unlock_all_subset; test_dispatcher_unlock_all_unknown_name; test_dispatcher_lock_all_and_enroll
+test_dispatcher_status_rows; test_dispatcher_bare_never_unlocks; test_dispatcher_unlock_all_order; test_dispatcher_all_prompts_back_to_back; test_dispatcher_unlock_all_subset; test_dispatcher_unlock_all_unknown_name; test_dispatcher_lock_all_and_enroll
 test_install_seeds_and_never_overwrites
 report
